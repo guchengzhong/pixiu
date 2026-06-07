@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+.tools/
+.env
+.env.*
+!.env.example
+
+# Local secrets and scratch data.
+docs/*api_key*.jsonl
+*.local.json
+*.local.jsonc
+
+# Runtime state.
+.minicode/state/
+.minicode/cache/
+.minicode/tmp/

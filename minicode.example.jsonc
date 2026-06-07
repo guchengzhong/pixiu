@@ -1,0 +1,49 @@
+{
+  "$schema": "./schema/minicode.schema.json",
+  "model": "openai-compatible/example-model",
+  "providers": {
+    "openai-compatible": {
+      "baseURL": "https://api.example.com/v1",
+      "apiKeyEnv": "MINICODE_OPENAI_COMPATIBLE_API_KEY"
+    }
+  },
+  "agents": {
+    "default": {
+      "description": "Default coding and research agent.",
+      "tools": ["read", "grep", "glob", "shell", "write", "edit", "patch", "todo", "skill"],
+      "maxSteps": 20
+    }
+  },
+  "permissions": {
+    "read": "allow",
+    "grep": "allow",
+    "glob": "allow",
+    "shell": "ask",
+    "edit": "ask",
+    "write": "ask"
+  },
+  "skills": {
+    "paths": [".minicode/skills", ".opencode/skills", "~/.claude/skills", "~/.agents/skills"]
+  },
+  "skillhub": {
+    "baseURL": "https://www.skillhub.club",
+    "apiKeyEnv": "SKILLHUB_API_KEY",
+    "installDir": ".minicode/skills"
+  },
+  "ui": {
+    "accentColor": "#3B8EEA"
+  },
+  "mcp": {},
+  "sandbox": {
+    "mode": "workspace",
+    "workspaceDir": "workspace",
+    "workspaceOnly": true,
+    "shellTimeoutMs": 30000,
+    "outputMaxBytes": 20000,
+    "envAllowlist": ["PATH", "HOME", "USER", "LANG", "LC_ALL", "SHELL", "TMPDIR"]
+  },
+  "compaction": {
+    "maxApproxTokens": 64000,
+    "keepRecentMessages": 12
+  }
+}
