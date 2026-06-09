@@ -4,6 +4,18 @@ Pixiu is a local-first, self-evolving CLI agent for your terminal: it helps you 
 
 The core stays focused on dependable agent primitives: LLM streaming, local file tools, shell execution, permissions, session workspaces, evidence, Skills, MCP, and a polished interactive CLI. Domain-specific workflows can start as temporary scripts, then graduate into local Skills or MCP servers when they prove useful.
 
+## Latest Update
+
+This update renames the project from `minicode` to `pixiu` and clarifies the product direction:
+
+- New command and package identity: `pixiu`.
+- New project config and state paths: `pixiu.jsonc`, `pixiu.example.jsonc`, and `.pixiu/**`.
+- Legacy migration support: Pixiu still reads `minicode.jsonc` when `pixiu.jsonc` is absent.
+- Refreshed terminal startup panel with a compact pixel mascot and recent activity.
+- Clearer local-first positioning: use temporary scripts for one-off work, then turn repeated workflows into reusable Skills.
+- Better long-session controls: `/clear` hides the visible transcript, while `/compact` summarizes older context without deleting session history.
+- Research/live-data path: `web_search` and `web_fetch` are available as permissioned tools, with source links expected in generated artifacts.
+
 ## Highlights
 
 - Interactive terminal chat with a startup panel, recent activity, live run status, permission prompts, and slash commands.
@@ -40,7 +52,14 @@ bun run src/cli/index.ts --help
 bun run src/cli/index.ts
 ```
 
-If you have linked or installed the command as `pixiu`, use:
+Link the local command during development:
+
+```bash
+bun link
+pixiu --help
+```
+
+After linking or installing the command, use:
 
 ```bash
 pixiu
@@ -126,6 +145,7 @@ Useful chat slash commands:
 /config
 /config setup
 /clear
+/compact
 /paste
 /tools
 /session
