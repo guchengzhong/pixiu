@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { access, mkdir, writeFile } from "node:fs/promises"
+import { spawn } from "node:child_process"
 import { homedir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -15,6 +16,7 @@ import { SkillHubProvider, installRemoteSkill, planSkillInstall } from "../skill
 import type { SkillInstallPlan, SkillInstallResult } from "../skillhub/types"
 import { createMCPClient, inspectMCPServers } from "../mcp/status"
 import { mcpToolsToDefinitions } from "../mcp/tools"
+import { DEFAULT_UI_HOST, DEFAULT_UI_PORT, startUiServer } from "../ui/server/server"
 import {
   CHAT_COMMANDS,
   applySlashCompletion,
@@ -69,6 +71,7 @@ Agent commands:
   pixiu run [--permission-mode default|acceptEdits|bypassPermissions|plan] <message>
   pixiu -p [--output-format text|json|stream-json] <message>
   pixiu chat [--permission-mode default|acceptEdits|bypassPermissions|plan]
+  pixiu ui [--host <host>] [--port <port>] [--no-open]
 
 Inspect:
   pixiu tool list
@@ -124,6 +127,7 @@ Examples:
   pixiu config use https://api.example.com/v1 sk-... openai-compatible/model
   pixiu config use-env siliconflow PIXIU_API_KEY deepseek-ai/DeepSeek-V3.2
   pixiu config set sandbox.shellTimeoutMs 30000
+  pixiu ui
 
 Pixiu is a local-first self-evolving CLI agent: do the work, learn from the task, and distill reusable Skills.
 `
@@ -1612,6 +1616,64 @@ async function toolCommand(args: string[]): Promise<CliResult> {
   return { exitCode: 0, output: formatToolList(runtime.tools.list()) }
 }
 
+async function uiCommand(args: string[]): Promise<CliResult> {
+  if (has(args, "--help", "-h")) {
+    return {
+      exitCode: 0,
+      output: [
+        "pixiu ui",
+        "",
+        "Usage:",
+        "  pixiu ui [--host <host>] [--port <port>] [--no-open]",
+        "",
+        "Starts the local browser UI for pixiu.",
+        `Default: http://${DEFAULT_UI_HOST}:${DEFAULT_UI_PORT}`,
+      ].join("\n"),
+    }
+  }
+  const hostFlag = takeFlagValue(args, "--host")
+  const portFlag = takeFlagValue(hostFlag.args, "--port")
+  const remaining = stripFlags(portFlag.args, ["--no-open"])
+  if (remaining.length) throw new PixiuError(`Unknown ui option: ${remaining.join(" ")}`, { code: "CLI_USAGE" })
+  const port = portFlag.value === undefined ? DEFAULT_UI_PORT : Number(portFlag.value)
+  if (!Number.isInteger(port) || port <= 0 || port > 65_535) {
+    throw new PixiuError(`Invalid UI port: ${portFlag.value ?? ""}`, { code: "CLI_USAGE" })
+  }
+  const host = hostFlag.value ?? DEFAULT_UI_HOST
+  const handle = await startUiServer({
+    host,
+    port,
+    open: !has(args, "--no-open"),
+    allowPublicHost: hostFlag.value === "0.0.0.0",
+  })
+  if (!has(args, "--no-open")) await openBrowser(handle.url).catch(() => undefined)
+  return {
+    exitCode: 0,
+    output: [
+      `pixiu UI running at ${handle.url}`,
+      `host: ${handle.host}`,
+      `port: ${handle.port}`,
+      "",
+      "Press Ctrl-C to stop.",
+    ].join("\n"),
+  }
+}
+
+async function openBrowser(url: string) {
+  const command =
+    process.platform === "darwin"
+      ? "open"
+      : process.platform === "win32"
+        ? "cmd"
+        : "xdg-open"
+  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url]
+  const child = spawn(command, args, {
+    detached: true,
+    stdio: "ignore",
+  })
+  child.unref()
+}
+
 async function skillCommand(args: string[]): Promise<CliResult> {
   const [subcommand, ...rest] = args
   const runtime = await buildRuntime({ loadLLM: false, yes: has(args, "--yes") })
@@ -2417,6 +2479,7 @@ function assertHTTPURL(value: string, label = "MCP HTTP URL") {
 export async function runCli(argv = process.argv.slice(2), options: CliOptions = {}): Promise<CliResult> {
   try {
     if (argv.length === 0 || onlyChatOptions(argv)) return await chatCommand(argv)
+    if ((argv[0] === "ui" || argv[0] === "serve") && has(argv, "--help", "-h")) return await uiCommand(argv.slice(1))
     if (has(argv, "--help", "-h")) return { exitCode: 0, output: HELP.trimEnd() }
     if (has(argv, "--version", "-v")) return { exitCode: 0, output: VERSION }
     if (has(argv, "-p", "--print")) return await runCommand(stripFlags(argv, ["-p", "--print"]), options)
@@ -2435,6 +2498,9 @@ export async function runCli(argv = process.argv.slice(2), options: CliOptions =
         return await configCommand(args)
       case "tool":
         return await toolCommand(args)
+      case "ui":
+      case "serve":
+        return await uiCommand(args)
       case "skill":
         return await skillCommand(args)
       case "mcp":

@@ -115,6 +115,15 @@ pixiu
 pixiu chat
 ```
 
+Start the local browser UI:
+
+```bash
+pixiu ui
+pixiu ui --port 2208 --no-open
+```
+
+The UI listens on `127.0.0.1` by default and prints a one-time local token in the URL. It provides a ChatGPT-style workspace for provider setup, new and resumed chats, file uploads, browser permission prompts, run trace, workspace files, evidence, and status diagnostics. Provider keys can be saved to project-local `pixiu.jsonc` or referenced through an environment variable; config and run outputs redact common secret shapes.
+
 Run a single task:
 
 ```bash
@@ -254,6 +263,7 @@ pixiu mcp remove <name>
 
 ```bash
 bun install
+bun run ui:build
 bun run typecheck
 bun test
 ```

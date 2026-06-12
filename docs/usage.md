@@ -65,6 +65,17 @@ pixiu config set sandbox.shellTimeoutMs 30000
 
 `pixiu` with no arguments starts the interactive chat UI. Use this when you want the CodeBuddy-style terminal experience with a startup panel, recent activity, shortcut hints, and an input prompt.
 
+Use `pixiu ui` when you want the browser workspace:
+
+```bash
+pixiu ui
+pixiu ui --port 2208 --no-open
+```
+
+The browser UI is local-first: it binds to `127.0.0.1` by default and requires the token printed in the URL for API calls. It lets you configure and test an OpenAI-compatible provider, create or resume sessions, upload files into the session workspace, approve or deny permission prompts, cancel runs, preview text artifacts, copy workspace-relative paths, and inspect trace/evidence/status panels.
+
+Provider setup in the browser supports endpoint aliases (`siliconflow`, `openai`, `deepseek`), custom base URLs, plaintext API keys, or API key environment variable names. Plaintext keys are written to project-local `pixiu.jsonc`; use the env-var mode if you do not want secrets in the project config.
+
 Default `run` output is formatted for people: it streams concise traces for tool calls and then prints the final answer. For example, shell calls show the command, exit code, elapsed time, and output size; failed tools also show a short redacted preview.
 
 `-p` / `--print` is a shortcut for non-interactive text output. It is meant for pipes and scripts, so it does not show the interactive startup panel or input box. It prints only the human-facing result plus any compact tool trace needed to explain work.

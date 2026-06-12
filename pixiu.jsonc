@@ -5,7 +5,8 @@
     "openai-compatible": {
       "baseURL": "https://api.siliconflow.cn/v1",
       "type": "openai-compatible",
-      "apiKey": "sk-yayshjcwlttywmjqeudokdsfxbieqijgvlrnzirxayqluqrs"
+      "apiKey": "sk-bzjmjgkapizozqtiotkdovkzivzyleffdcbdlhdfavvxfzmv",
+      "model": "deepseek-ai/DeepSeek-V4-Flash"
     }
   },
   "agents": {
