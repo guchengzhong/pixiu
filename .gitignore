@@ -16,3 +16,9 @@ docs/*api_key*.jsonl
 .minicode/state/
 .minicode/cache/
 .minicode/tmp/
+.pixiu/state/
+.pixiu/cache/
+.pixiu/tmp/
+
+# Project-local provider secrets. Keep pixiu.example.jsonc tracked.
+pixiu.jsonc

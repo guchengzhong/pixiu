@@ -60,6 +60,9 @@ export type PixiuConfig = {
   }
 }
 
+// The default configuration for Pixiu,
+// which can be overridden by a local config file. It includes the default model and provider settings,
+// the default agent configuration, permission rules, skill paths, UI settings, and sandbox settings.
 export const defaultConfig = {
   model: "openai-compatible/example-model",
   providers: {

@@ -1,5 +1,0 @@
-{"type":"session","session":{"id":"session_mq2hyp73_0001_1r9o8iz","cwd":"/home/gujing/code/minicode/workspace/session_mq2hyp73_0001_1r9o8iz","createdAt":"2026-06-06T15:17:35.634Z","updatedAt":"2026-06-06T15:17:35.634Z","title":"苏州明天天气","metadata":{"sandboxMode":"workspace","workspaceDir":"workspace/session_mq2hyp73_0001_1r9o8iz"}}}
-{"type":"message","message":{"id":"msg_mq2hyp77_0001_0wistpy","sessionId":"session_mq2hyp73_0001_1r9o8iz","role":"user","createdAt":"2026-06-06T15:17:35.635Z","parts":[{"type":"text","text":"苏州明天天气"}]}}
-{"type":"update","patch":{"updatedAt":"2026-06-06T15:17:35.635Z"}}
-{"type":"message","message":{"id":"msg_mq2hyugk_0002_0k13qhr","sessionId":"session_mq2hyp73_0001_1r9o8iz","role":"assistant","createdAt":"2026-06-06T15:17:42.452Z","parts":[{"type":"text","text":"我来帮您查询苏州明天的天气。由于我无法直接访问实时天气数据，我需要通过命令行工具或在线服务来获取信息。\n\n"},{"type":"tool_call","id":"019e9d82dc5cca2efc748cee0340b125","name":"shell","input":{"command":"curl -s \"https://wttr.in/苏州?format=%C+%t+%h+%w&lang=zh\" 2>/dev/null || echo \"获取天气信息失败\"","timeoutMs":10000}}]}}
-{"type":"update","patch":{"updatedAt":"2026-06-06T15:17:42.452Z"}}

@@ -53,6 +53,7 @@ function unquote(value: string) {
   return trimmed
 }
 
+// Parses the metadata from a skill file.
 function parseMetadata(content: string, skillPath: string) {
   const { metadata, body } = splitFrontmatter(content)
   const heading = body.match(/^#\s+(.+)$/m)?.[1]?.trim()
@@ -66,6 +67,7 @@ function parseMetadata(content: string, skillPath: string) {
   if (!name || !description) {
     throw new PixiuError(`Skill ${skillPath} must include name and description`, { code: "SKILL_INVALID" })
   }
+  // Trim the name and description.
   return { name: name.trim(), description: description.trim() }
 }
 
@@ -105,6 +107,7 @@ export class SkillLoader {
 
       let matches: string[] = []
       try {
+        // recursively scan for SKILL.md files under the root directory. Each SKILL.md represents a skill, and its parent directory is the skill root.
         for await (const skillPath of new Bun.Glob("**/SKILL.md").scan({ cwd: root, absolute: true, onlyFiles: true })) {
           matches.push(skillPath)
         }
@@ -116,9 +119,12 @@ export class SkillLoader {
         })
         continue
       }
-
+      // sort the matches to ensure deterministic order of skill loading and duplicate 
+      // detection. The sorting is based on the skillPath string comparison, which 
+      // effectively sorts by directory depth and then alphabetically.
       for (const skillPath of matches.sort((a, b) => a.localeCompare(b))) {
         let metadata: Pick<SkillSummary, "name" | "description">
+        // name and description are required metadata.
         try {
           metadata = parseMetadata(await readFile(skillPath, "utf8"), skillPath)
         } catch (cause) {
@@ -132,11 +138,14 @@ export class SkillLoader {
         }
 
         const summary: SkillSummary = {
+          // spread the parsed metadata
+          // object spread
           ...metadata,
           rootDir: dirname(skillPath),
           skillPath,
           source: skillSource(root, rootIndex, skillPath),
         }
+        // deal with duplicate skill.
         const existing = skills.get(summary.name)
         if (existing) {
           existing.duplicates = [...(existing.duplicates ?? []), duplicateOf(summary)]
@@ -151,6 +160,23 @@ export class SkillLoader {
         skills.set(summary.name, summary)
       }
     }
+    // skills.values() return iterator of skillsummary objects.
+    // ... spread into array and sort by skill name.
+    // [
+    //   {
+    //     name: "pdf",
+    //     description: "Process PDF files",
+    //     rootDir: "/skills/pdf",
+    //     skillPath: "/skills/pdf/SKILL.md"
+    //   },
+    //   {
+    //     name: "excel",
+    //     description: "Process Excel files",
+    //     rootDir: "/skills/excel",
+    //     skillPath: "/skills/excel/SKILL.md"
+    //   }
+    // ]
+    // [...] means spread the iterable into an array literal.
     return {
       skills: [...skills.values()].sort((a, b) => a.name.localeCompare(b.name)),
       diagnostics,
@@ -179,6 +205,8 @@ export class SkillLoader {
     })
   }
 
+  // Loads the skill instructions and reference files. The skill content is the full text content of the SKILL.md
+  // file, and the reference files are all other files under the same skill root directory.
   async load(name: string): Promise<LoadedSkill> {
     const skill = await this.find(name)
     return { ...skill, content: await readFile(skill.skillPath, "utf8"), files: await this.filesFor(skill) }
@@ -187,7 +215,9 @@ export class SkillLoader {
   async files(name: string) {
     return this.filesFor(await this.find(name))
   }
-
+  
+  // Reads a specific file under the skill root directory. This is used by the skill tool to safely 
+  // load reference files listed in the skill instructions.
   async readRelative(skillName: string, relativePath: string) {
     const skill = await this.find(skillName)
     const normalized = relativePath.trim()

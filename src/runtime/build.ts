@@ -50,6 +50,9 @@ export type RuntimeWithoutLLM = RuntimeBase & { runner?: undefined }
 
 export async function buildRuntime(options?: RuntimeOptions & { loadLLM?: true }): Promise<Runtime>
 export async function buildRuntime(options: RuntimeOptions & { loadLLM: false }): Promise<RuntimeWithoutLLM>
+// Builds the Pixiu runtime by loading the configuration, initializing the permission manager, session store, skill loader,
+// tool registry, and optionally the LLM client and agent runner. The runtime provides all necessary components for running
+// agents and tools, and abstracts away the initialization logic.
 export async function buildRuntime(options: RuntimeOptions = {}): Promise<Runtime | RuntimeWithoutLLM> {
   const cwd = resolve(options.cwd ?? process.cwd())
   const config = options.config ?? (await loadConfig({ cwd }))
@@ -68,6 +71,7 @@ export async function buildRuntime(options: RuntimeOptions = {}): Promise<Runtim
   )
   const pathGuard = new PathGuard({ workspaceRoot: cwd, workspaceOnly: config.sandbox.workspaceOnly })
   const sessions = new JsonlSessionStore(join(cwd, ".pixiu/state/sessions"))
+  // skills: create skillloader with config paths. 
   const skills = new SkillLoader(config.skills.paths.map((path) => (path.startsWith("~") ? path : join(cwd, path))))
   const tools = new ToolRegistry()
     .registerMany(createBuiltinTools())
@@ -97,7 +101,7 @@ export async function buildRuntime(options: RuntimeOptions = {}): Promise<Runtim
 
   const provider = resolveProviderConfig(config)
   const llm = options.llm ?? createLLM({ provider })
-
+  // inject the skill tool with the skill loader, so that the agent can load the skill instructions and reference files when needed.
   const skillPrompt = await renderSkillSystemPrompt(skills)
   const agentConfig = config.agents.default!
   const toolConfig = {

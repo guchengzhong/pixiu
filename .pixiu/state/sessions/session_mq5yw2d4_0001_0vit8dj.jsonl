@@ -1,5 +1,0 @@
-{"type":"session","session":{"id":"session_mq5yw2d4_0001_0vit8dj","cwd":"/home/gujing/code/minicode/workspace/session_mq5yw2d4_0001_0vit8dj","createdAt":"2026-06-09T01:34:44.729Z","updatedAt":"2026-06-09T01:34:44.729Z","title":"你几岁了啊","metadata":{"sandboxMode":"workspace","workspaceDir":"workspace/session_mq5yw2d4_0001_0vit8dj"}}}
-{"type":"message","message":{"id":"msg_mq5yw2d5_0001_0ohwhg3","sessionId":"session_mq5yw2d4_0001_0vit8dj","role":"user","createdAt":"2026-06-09T01:34:44.729Z","parts":[{"type":"text","text":"你几岁了啊"}]}}
-{"type":"update","patch":{"updatedAt":"2026-06-09T01:34:44.729Z"}}
-{"type":"message","message":{"id":"msg_mq5yw643_0002_1nd57rb","sessionId":"session_mq5yw2d4_0001_0vit8dj","role":"assistant","createdAt":"2026-06-09T01:34:49.587Z","parts":[{"type":"text","text":"哈哈，我是一串代码，没有年龄这个概念哦！如果非要算的话，大概从我被「创建」出来到现在…也就几分钟？😄\n\n不过别担心，虽然「岁数小」，但我能做的事情可不少！有什么需要帮忙的吗？尽管说～"}]}}
-{"type":"update","patch":{"updatedAt":"2026-06-09T01:34:49.587Z"}}

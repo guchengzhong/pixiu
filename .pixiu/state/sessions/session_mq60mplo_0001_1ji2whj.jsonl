@@ -1,5 +1,0 @@
-{"type":"session","session":{"id":"session_mq60mplo_0001_1ji2whj","cwd":"/home/gujing/code/minicode/workspace/session_mq60mplo_0001_1ji2whj","createdAt":"2026-06-09T02:23:27.519Z","updatedAt":"2026-06-09T02:23:27.519Z","title":"\\clear","metadata":{"sandboxMode":"workspace","workspaceDir":"workspace/session_mq60mplo_0001_1ji2whj"}}}
-{"type":"message","message":{"id":"msg_mq60mpls_0001_151mb8o","sessionId":"session_mq60mplo_0001_1ji2whj","role":"user","createdAt":"2026-06-09T02:23:27.520Z","parts":[{"type":"text","text":"\\clear"}]}}
-{"type":"update","patch":{"updatedAt":"2026-06-09T02:23:27.520Z"}}
-{"type":"message","message":{"id":"msg_mq60msdf_0002_0l6kujt","sessionId":"session_mq60mplo_0001_1ji2whj","role":"assistant","createdAt":"2026-06-09T02:23:31.108Z","parts":[{"type":"error","message":"AbortError: The operation was aborted."}]}}
-{"type":"update","patch":{"updatedAt":"2026-06-09T02:23:31.108Z"}}
