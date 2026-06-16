@@ -1,6 +1,7 @@
 import type { AgentEvent } from "../agent/events"
 import type { JsonObject, JsonValue } from "../shared/json"
 import { redactSecrets } from "../shared/redact"
+import type { TodoItem, TodoStatus } from "../todo/types"
 import { createTerminal, formatBytes, formatDuration, oneLine, stripAnsi, type Terminal } from "./terminal"
 
 type Writer = (text: string) => void
@@ -29,6 +30,7 @@ export class CliTraceRenderer {
   private readonly activeTools = new Map<string, ActiveTool>()
   private printedTrace = false
   private answerStarted = false
+  private lastTodoSnapshot = ""
 
   constructor(options: CliTraceRendererOptions) {
     this.writeChunk = options.write
@@ -48,6 +50,9 @@ export class CliTraceRenderer {
         return
       case "tool_result":
         this.toolResult(event)
+        return
+      case "todo_updated":
+        this.todoUpdated(event)
         return
       case "llm_text_delta":
         this.textDelta(event.text)
@@ -116,6 +121,14 @@ export class CliTraceRenderer {
     }
   }
 
+  private todoUpdated(event: Extract<AgentEvent, { type: "todo_updated" }>) {
+    const snapshot = todoSnapshotKey(event.todos, event.currentTodoId)
+    if (snapshot === this.lastTodoSnapshot) return
+    this.lastTodoSnapshot = snapshot
+    const block = formatTodoBlock(event.todos, event.currentTodoId, this.terminal)
+    if (block) this.writeTrace(`${block}\n`)
+  }
+
   private textDelta(text: string) {
     if (!this.answerStarted) {
       if (this.printedTrace) this.write("\n")
@@ -144,6 +157,38 @@ export class CliTraceRenderer {
 function objectValue(value: JsonValue | undefined): JsonObject {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {}
   return value
+}
+
+function todoSnapshotKey(todos: TodoItem[], currentTodoId: string | undefined) {
+  return JSON.stringify({
+    currentTodoId: currentTodoId ?? "",
+    todos: todos.map((todo) => ({
+      id: todo.id,
+      content: todo.content,
+      status: todo.status,
+      priority: todo.priority,
+    })),
+  })
+}
+
+function formatTodoBlock(todos: TodoItem[], currentTodoId: string | undefined, terminal: Terminal) {
+  if (!todos.length) return ""
+  const targetWidth = Math.max(24, Math.min(180, terminal.width - 4))
+  const lines = [terminal.blue("Tasks")]
+  for (const todo of todos) {
+    const current = currentTodoId ? todo.id === currentTodoId : todo.status === "in_progress"
+    const marker = todoMarker(todo.status)
+    const content = oneLine(todo.content, targetWidth)
+    lines.push(current ? terminal.bold(`${marker} ${content}`) : `${marker} ${content}`)
+  }
+  return lines.join("\n")
+}
+
+function todoMarker(status: TodoStatus) {
+  if (status === "completed") return "✓"
+  if (status === "in_progress") return "●"
+  if (status === "cancelled") return "×"
+  return "○"
 }
 
 function stringValue(input: JsonObject, key: string) {
@@ -187,6 +232,8 @@ function formatToolCall(name: string, input: JsonObject, terminal: Terminal) {
       return `${label("patch")} ${oneLine(stringValue(input, "path") || "(missing path)", targetWidth())}`
     case "todo":
       return label("todo")
+    case "todowrite":
+      return label("todowrite")
     case "skill":
       return `${label("skill")} ${quote(stringValue(input, "name"))}${stringValue(input, "path") ? ` ${quote(stringValue(input, "path"))}` : ""}`
     case "skill_search":

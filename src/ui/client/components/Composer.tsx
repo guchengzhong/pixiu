@@ -1,6 +1,7 @@
 import type { RefObject } from "react"
 
-import { maybeSend } from "../helpers"
+import { formatSize, maybeSend } from "../helpers"
+import type { FileReference } from "../types"
 
 export function Composer({
   prompt,
@@ -13,6 +14,10 @@ export function Composer({
   runStatus,
   runId,
   cancelRun,
+  attachments,
+  uploadError,
+  onPreviewAttachment,
+  onRemoveAttachment,
 }: {
   prompt: string
   setPrompt(value: string): void
@@ -24,10 +29,41 @@ export function Composer({
   runStatus: string
   runId: string | undefined
   cancelRun(): Promise<void>
+  attachments: FileReference[]
+  uploadError: string | undefined
+  onPreviewAttachment(reference: FileReference): void
+  onRemoveAttachment(reference: FileReference): void
 }) {
+  const canSend = Boolean(prompt.trim() || attachments.length) && !runId
+
   return (
     <div className="composer-shell">
       <div className="composer">
+        {attachments.length ? (
+          <div className="composer-attachments" aria-label="Referenced files">
+            {attachments.map((attachment) => (
+              <span
+                className="attachment-chip file-reference-chip"
+                key={`${attachment.source}:${attachment.path}`}
+              >
+                <button className="attachment-preview" type="button" title={`Preview ${attachment.path}`} onClick={() => onPreviewAttachment(attachment)}>
+                  <span className="attachment-name">{attachment.name}</span>
+                  <span className="attachment-meta">
+                    {attachment.source} · {attachment.size !== undefined ? formatSize(attachment.size) : attachment.kind ?? "file"} · {attachment.status}
+                  </span>
+                </button>
+                <button
+                  className="attachment-remove"
+                  type="button"
+                  title="Remove reference from this message"
+                  onClick={() => onRemoveAttachment(attachment)}
+                >
+                  x
+                </button>
+              </span>
+            ))}
+          </div>
+        ) : null}
         <textarea
           value={prompt}
           onChange={(event) => setPrompt(event.currentTarget.value)}
@@ -35,9 +71,21 @@ export function Composer({
           placeholder="Message Pixiu"
           rows={2}
         />
+        {uploadError ? <div className="upload-error">{uploadError}</div> : null}
         <div className="composer-row">
           <div className="composer-tools">
-            <input ref={fileInputRef} type="file" multiple hidden onChange={(event) => void uploadFiles(event.currentTarget.files)} />
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              hidden
+              onChange={(event) => {
+                const input = event.currentTarget
+                void uploadFiles(input.files).finally(() => {
+                  input.value = ""
+                })
+              }}
+            />
             <button className="icon-button" type="button" title="Upload files" onClick={() => fileInputRef.current?.click()}>+</button>
             <select className="select" value={permissionMode} onChange={(event) => setPermissionMode(event.currentTarget.value)} title="Permission mode">
               <option value="acceptEdits">accept edits</option>
@@ -49,7 +97,7 @@ export function Composer({
             <span className="run-status">{runStatus}</span>
           </div>
           {runId ? <button className="ghost" type="button" onClick={() => void cancelRun()}>Cancel</button> : null}
-          <button className="send" type="button" title="Send" disabled={!prompt.trim() || Boolean(runId)} onClick={() => void sendPrompt()}>↑</button>
+          <button className="send" type="button" title="Send" disabled={!canSend} onClick={() => void sendPrompt()}>↑</button>
         </div>
       </div>
     </div>

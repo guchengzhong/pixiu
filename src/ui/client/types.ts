@@ -12,6 +12,24 @@ export type ChatMessage = {
   pending?: boolean
 }
 
+export type FileReferenceSource = "uploaded" | "workspace" | "generated" | "evidence"
+
+export type FileReference = {
+  path: string
+  name: string
+  source: FileReferenceSource
+  status: "uploaded" | "ready" | "referenced"
+  size?: number
+  kind?: "text" | "binary"
+}
+
+export type FilePreview = {
+  path: string
+  content?: string
+  message?: string
+  status: "ready" | "unsupported" | "error"
+}
+
 export type PermissionView = {
   id: string
   request: {

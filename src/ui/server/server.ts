@@ -297,7 +297,13 @@ async function routeApi(request: Request, url: URL, context: UiServerContext): P
     const runtime = await runtimeFor(context)
     const session = await requireSession(runtime, decodeURIComponent(sessionDetailMatch[1] ?? ""))
     const messages = await runtime.sessions.readMessages(session.id)
-    return jsonResponse(apiSuccess({ session: sessionSummary(session), messages, evidence: collectSessionEvidence(messages), files: await listSessionFiles(session) }))
+    return jsonResponse(apiSuccess({
+      session: sessionSummary(session),
+      messages,
+      evidence: collectSessionEvidence(messages),
+      files: await listSessionFiles(session),
+      todos: await runtime.sessions.getTodos(session.id),
+    }))
   }
 
   if (request.method === "POST" && url.pathname === "/api/runs") {

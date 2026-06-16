@@ -1,6 +1,7 @@
 import type { SessionEvidence } from "../../../session/evidence"
+import type { TodoItem } from "../../../todo/types"
 import type { UiFileSummary } from "../../shared/api"
-import type { InspectorTab, StatusSummary, TraceItem } from "../types"
+import type { FilePreview, FileReferenceSource, InspectorTab, StatusSummary, TraceItem } from "../types"
 import { ActivityPanel } from "./ActivityPanel"
 
 export function RightInspector(props: {
@@ -11,10 +12,13 @@ export function RightInspector(props: {
   close(): void
   trace: TraceItem[]
   files: UiFileSummary[]
-  preview: { path: string; content: string } | undefined
+  preview: FilePreview | undefined
   evidence: SessionEvidence | undefined
   status: StatusSummary | undefined
-  onPreview(path: string): void
+  todos: TodoItem[]
+  currentTodoId: string | undefined
+  onPreview(file: UiFileSummary): void
+  onReference(file: UiFileSummary, source: FileReferenceSource): void
 }) {
   return <ActivityPanel {...props} />
 }

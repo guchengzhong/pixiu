@@ -36,7 +36,16 @@ export type ProviderConfigPayload = {
 
 type UiFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
+export function resolveUiToken(injectedToken: string | undefined, search = typeof window !== "undefined" ? window.location.search : "") {
+  return injectedToken || new URLSearchParams(search).get("token") || ""
+}
+
 export function createUiApiClient(token: string, fetchImpl: UiFetch = fetch): UiApiClient {
+  const withTokenQuery = (path: string) => {
+    if (!token) return path
+    return `${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`
+  }
+
   const requestJson = async <T>(path: string, init: RequestInit = {}) => {
     const response = await fetchImpl(path, {
       ...init,
@@ -79,7 +88,7 @@ export function createUiApiClient(token: string, fetchImpl: UiFetch = fetch): Ui
     async uploadFiles(sessionId, files) {
       const form = new FormData()
       for (const file of Array.from(files)) form.append("files", file)
-      const response = await fetchImpl(`/api/sessions/${encodeURIComponent(sessionId)}/uploads`, {
+      const response = await fetchImpl(withTokenQuery(`/api/sessions/${encodeURIComponent(sessionId)}/uploads`), {
         method: "POST",
         headers: { authorization: `Bearer ${token}` },
         body: form,
@@ -104,7 +113,7 @@ export function createUiApiClient(token: string, fetchImpl: UiFetch = fetch): Ui
         body: JSON.stringify(input),
       }),
     eventSource(runId) {
-      return new EventSource(`/api/runs/${encodeURIComponent(runId)}/events?token=${encodeURIComponent(token)}`)
+      return new EventSource(withTokenQuery(`/api/runs/${encodeURIComponent(runId)}/events`))
     },
   }
 }

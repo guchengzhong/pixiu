@@ -3,6 +3,7 @@ import type { JsonValue } from "../../shared/json"
 import type { SessionEvidence } from "../../session/evidence"
 import type { SessionMessage } from "../../session/types"
 import type { AgentEvent } from "../../agent/events"
+import type { TodoItem } from "../../todo/types"
 
 export type ApiSuccess<T> = {
   ok: true
@@ -81,6 +82,7 @@ export type UiSessionDetail = {
   messages: SessionMessage[]
   evidence: SessionEvidence
   files: UiFileSummary[]
+  todos: TodoItem[]
 }
 
 export type UiRunStatus = "queued" | "running" | "waiting_permission" | "done" | "error" | "cancelled"

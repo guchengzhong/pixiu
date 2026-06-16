@@ -9,6 +9,9 @@ import { ToolRegistry } from "../../src/tools/registry"
 import { StaticPermissionManager } from "../../src/permission/evaluator"
 import { PathGuard } from "../../src/sandbox/path"
 import { ScriptedLLMClient } from "../fixtures/scripted-llm"
+import { createBuiltinTools } from "../../src/tools/builtin"
+import type { AgentEvent } from "../../src/agent/events"
+import type { JsonObject } from "../../src/shared/json"
 
 describe("agent runner", () => {
   test("closes a scripted tool-call loop", async () => {
@@ -279,4 +282,129 @@ describe("agent runner", () => {
     expect(events.some((event) => event.type === "message" && event.content === "ok")).toBe(true)
     expect(events.some((event) => event.type === "message" && event.content.includes("FINAL"))).toBe(false)
   })
+
+  test("promotes successful todowrite metadata to todo_updated after tool_result", async () => {
+    const { events } = await runScriptedTool("todowrite", {
+      todos: [
+        { id: "inspect", content: "Inspect workspace", status: "completed", priority: "high" },
+        { id: "implement", content: "Implement change", status: "in_progress", priority: "medium" },
+      ],
+    })
+
+    expect(eventTypesAround(events, "tool_call", "todo_updated")).toEqual(["tool_call", "tool_result", "todo_updated"])
+    expect(events.find((event) => event.type === "todo_updated")).toMatchObject({
+      type: "todo_updated",
+      currentTodoId: "implement",
+      todos: [
+        { id: "inspect", content: "Inspect workspace", status: "completed", priority: "high" },
+        { id: "implement", content: "Implement change", status: "in_progress", priority: "medium" },
+      ],
+    })
+  })
+
+  test("todo_updated omits currentTodoId when no todo is in progress", async () => {
+    const { events } = await runScriptedTool("todowrite", {
+      todos: [
+        { id: "done", content: "Already done", status: "completed", priority: "low" },
+        { id: "next", content: "Next up", status: "pending", priority: "medium" },
+      ],
+    })
+
+    const event = events.find((item) => item.type === "todo_updated")
+    expect(event).toMatchObject({ type: "todo_updated", todos: expect.any(Array) })
+    expect(event && "currentTodoId" in event).toBe(false)
+  })
+
+  test("ordinary tool calls do not emit todo_updated and still emit tool events", async () => {
+    const { events } = await runScriptedTool("echo", { text: "ping" }, echoTools())
+
+    expect(events.some((event) => event.type === "tool_call" && event.name === "echo")).toBe(true)
+    expect(events.some((event) => event.type === "tool_result" && event.name === "echo" && event.ok)).toBe(true)
+    expect(events.some((event) => event.type === "todo_updated")).toBe(false)
+    expect(events.some((event) => event.type === "message" && event.content === "done")).toBe(true)
+  })
+
+  test("legacy todo metadata is also promoted to todo_updated", async () => {
+    const { events } = await runScriptedTool("todo", { items: ["inspect workspace", "write summary"] })
+
+    expect(eventTypesAround(events, "tool_call", "todo_updated")).toEqual(["tool_call", "tool_result", "todo_updated"])
+    expect(events.find((event) => event.type === "todo_updated")).toMatchObject({
+      type: "todo_updated",
+      todos: [
+        { id: "todo_inspect_workspace", content: "inspect workspace", status: "pending", priority: "medium" },
+        { id: "todo_write_summary", content: "write summary", status: "pending", priority: "medium" },
+      ],
+    })
+  })
+
+  test("runner persists todowrite todos to the session store", async () => {
+    const { events, sessions } = await runScriptedTool("todowrite", {
+      todos: [{ id: "persist", content: "Persist todos", status: "in_progress", priority: "high" }],
+    })
+    const sessionId = events.find((event) => event.type === "session_created")?.sessionId
+
+    expect(sessionId).toBeString()
+    expect(await sessions.getTodos(sessionId!)).toEqual([
+      { id: "persist", content: "Persist todos", status: "in_progress", priority: "high" },
+    ])
+    expect(await sessions.getTodoState(sessionId!)).toMatchObject({ currentTodoId: "persist" })
+  })
+
+  test("failed todowrite does not persist todos", async () => {
+    const { events, sessions } = await runScriptedTool("todowrite", {
+      todos: [
+        { content: "First", status: "in_progress", priority: "high" },
+        { content: "Second", status: "in_progress", priority: "medium" },
+      ],
+    })
+    const sessionId = events.find((event) => event.type === "session_created")?.sessionId
+
+    expect(events.some((event) => event.type === "tool_result" && event.name === "todowrite" && !event.ok)).toBe(true)
+    expect(events.some((event) => event.type === "todo_updated")).toBe(false)
+    expect(await sessions.getTodos(sessionId!)).toEqual([])
+  })
 })
+
+async function runScriptedTool(name: string, input: JsonObject, tools = new ToolRegistry().registerMany(createBuiltinTools())) {
+  const root = await mkdtemp(join(tmpdir(), `pixiu-agent-${name}-`))
+  const sessions = new MemorySessionStore()
+  const runner = new AgentRunner({
+    llm: new ScriptedLLMClient([
+      [{ type: "tool_call", call: { id: "call_1", name, input } }, { type: "finish", reason: "tool_calls" }],
+      [{ type: "text_start" }, { type: "text_delta", text: "FINAL: done" }, { type: "text_end", text: "FINAL: done" }, { type: "finish", reason: "stop" }],
+    ]),
+    tools,
+    sessions,
+    model: "scripted",
+    systemPrompt: "test",
+    maxSteps: 4,
+    toolContext: {
+      cwd: root,
+      workspaceRoot: root,
+      permissions: new StaticPermissionManager([{ tool: "*", action: "allow" }]),
+      pathGuard: new PathGuard({ workspaceRoot: root, workspaceOnly: true }),
+      config: { shellTimeoutMs: 500, outputMaxBytes: 4_000, envAllowlist: ["PATH"] },
+    },
+  })
+
+  const events: AgentEvent[] = []
+  for await (const event of runner.run({ message: "go" })) events.push(event)
+  return { events, sessions }
+}
+
+function echoTools() {
+  return new ToolRegistry().register({
+    name: "echo",
+    description: "echo",
+    inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+    async execute(input) {
+      return { ok: true, content: String(input.text), data: input }
+    },
+  })
+}
+
+function eventTypesAround(events: AgentEvent[], start: AgentEvent["type"], end: AgentEvent["type"]) {
+  const startIndex = events.findIndex((event) => event.type === start)
+  const endIndex = events.findIndex((event) => event.type === end)
+  return events.slice(startIndex, endIndex + 1).map((event) => event.type)
+}

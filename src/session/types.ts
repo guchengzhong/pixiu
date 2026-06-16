@@ -1,4 +1,5 @@
 import type { JsonObject, JsonValue } from "../shared/json"
+import type { TodoItem } from "../todo/types"
 
 export type MessageRole = "system" | "user" | "assistant" | "tool"
 
@@ -34,11 +35,19 @@ export type CreateSessionInput = {
   metadata?: JsonObject
 }
 
+export type SessionTodoState = {
+  todos: TodoItem[]
+  currentTodoId?: string
+}
+
 export interface SessionStore {
   create(input: CreateSessionInput): Promise<SessionRecord>
   appendMessage(message: Omit<SessionMessage, "id" | "createdAt"> & Partial<Pick<SessionMessage, "id" | "createdAt">>): Promise<SessionMessage>
   getSession(id: string): Promise<SessionRecord | undefined>
   readMessages(sessionId: string): Promise<SessionMessage[]>
+  getTodos(sessionId: string): Promise<TodoItem[]>
+  getTodoState(sessionId: string): Promise<SessionTodoState>
+  updateTodos(sessionId: string, todos: TodoItem[]): Promise<void>
   listSessions(): Promise<SessionRecord[]>
   updateSession(sessionId: string, patch: Partial<Pick<SessionRecord, "title" | "summary" | "metadata">>): Promise<SessionRecord>
 }

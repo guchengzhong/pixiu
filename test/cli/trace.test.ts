@@ -110,4 +110,66 @@ describe("CliTraceRenderer", () => {
     expect(output).toContain("● Write(agent_sandbox_papers.md)")
     expect(output).toContain("⎿ ✓ Wrote agent_sandbox_papers.md")
   })
+
+  test("renders compact todo snapshots from todo_updated events", () => {
+    const output = render([
+      {
+        type: "todo_updated",
+        sessionId: "session_1",
+        currentTodoId: "implement",
+        todos: [
+          { id: "inspect", content: "Inspect workspace", status: "completed", priority: "high" },
+          { id: "implement", content: "Implement todo persistence", status: "in_progress", priority: "medium" },
+          { id: "web", content: "Update Web UI progress panel", status: "pending", priority: "low" },
+          { id: "old", content: "Drop old scratch plan", status: "cancelled", priority: "low" },
+        ],
+      },
+    ])
+
+    expect(output).toContain("Tasks")
+    expect(output).toContain("✓ Inspect workspace")
+    expect(output).toContain("● Implement todo persistence")
+    expect(output).toContain("○ Update Web UI progress panel")
+    expect(output).toContain("× Drop old scratch plan")
+  })
+
+  test("does not repeat identical todo snapshots", () => {
+    const snapshot = {
+      type: "todo_updated" as const,
+      sessionId: "session_1",
+      todos: [{ id: "one", content: "Do one thing", status: "pending" as const, priority: "medium" as const }],
+    }
+    const output = render([snapshot, snapshot])
+
+    expect((output.match(/Tasks/g) ?? []).length).toBe(1)
+    expect((output.match(/○ Do one thing/g) ?? []).length).toBe(1)
+  })
+
+  test("renders todo block before later ordinary tool traces", () => {
+    const output = render([
+      {
+        type: "todo_updated",
+        sessionId: "session_1",
+        currentTodoId: "read",
+        todos: [{ id: "read", content: "Read file", status: "in_progress", priority: "high" }],
+      },
+      { type: "tool_call", id: "read_1", name: "read", input: { path: "docs/usage.md" } },
+      { type: "tool_result", id: "read_1", name: "read", ok: true, content: "hello", metadata: { path: "docs/usage.md" } },
+    ])
+
+    expect(output.indexOf("Tasks")).toBeLessThan(output.indexOf("tool read docs/usage.md"))
+    expect(output).toContain("tool read docs/usage.md")
+    expect(output).toContain("  ok")
+  })
+
+  test("old traces without todo_updated keep the same compact tool output", () => {
+    const output = render([
+      { type: "tool_call", id: "todo_1", name: "todo", input: { items: ["inspect workspace"] } },
+      { type: "tool_result", id: "todo_1", name: "todo", ok: true, content: "1. inspect workspace" },
+    ])
+
+    expect(output).toContain("tool todo")
+    expect(output).toContain("  ok")
+    expect(output).not.toContain("Tasks")
+  })
 })

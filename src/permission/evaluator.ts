@@ -2,7 +2,7 @@ import type { PixiuConfig, PermissionAction } from "../config/defaults"
 import type { PermissionDecision, PermissionManager, PermissionMode, PermissionRequest, PermissionRule } from "./types"
 
 const EDIT_TOOLS = new Set(["write", "edit", "patch"])
-const PLAN_ALLOWED_TOOLS = new Set(["read", "grep", "glob", "todo", "skill_search", "skill", "skillhub_search"])
+const PLAN_ALLOWED_TOOLS = new Set(["read", "grep", "glob", "todo", "todowrite", "skill_search", "skill", "skillhub_search"])
 
 function wildcardMatch(pattern: string, value: string) {
   const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")

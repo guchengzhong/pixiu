@@ -3,8 +3,9 @@ import { createRoot } from "react-dom/client"
 
 import type { AgentEvent } from "../../agent/events"
 import type { SessionEvidence } from "../../session/evidence"
+import type { TodoItem } from "../../todo/types"
 import type { UiFileSummary, UiProviderSummary, UiSessionSummary } from "../shared/api"
-import { createUiApiClient, type ProviderConfigPayload } from "./api"
+import { createUiApiClient, resolveUiToken, type ProviderConfigPayload } from "./api"
 import { AppSidebar } from "./components/AppSidebar"
 import { ChatPane } from "./components/ChatPane"
 import { ConfigModal } from "./components/ConfigModal"
@@ -13,8 +14,9 @@ import { RightInspector } from "./components/RightInspector"
 import { TopBar } from "./components/TopBar"
 import { WorkbenchLayout } from "./components/WorkbenchLayout"
 import { ENDPOINTS } from "./constants"
-import { errorMessage, presetForBaseURL, sessionMessages, traceFromMessages } from "./helpers"
-import type { ChatMessage, InspectorTab, PermissionView, StatusSummary, TraceItem } from "./types"
+import { errorMessage, fileNameFromPath, isPreviewUnsupported, presetForBaseURL, sessionMessages, traceFromMessages } from "./helpers"
+import { currentTodoIdFromTodos, normalizeTodos, todoUpdateMatchesSession } from "./todos"
+import type { ChatMessage, FilePreview, FileReference, FileReferenceSource, InspectorTab, PermissionView, StatusSummary, TraceItem } from "./types"
 import "./styles.css"
 
 declare global {
@@ -24,10 +26,12 @@ declare global {
 }
 
 function App() {
-  const token = window.__PIXIU_UI_TOKEN__
+  const token = resolveUiToken(window.__PIXIU_UI_TOKEN__)
   const api = useMemo(() => createUiApiClient(token ?? ""), [token])
   const [provider, setProvider] = useState<UiProviderSummary>()
   const [sessions, setSessions] = useState<UiSessionSummary[]>([])
+  const [sessionsLoading, setSessionsLoading] = useState(false)
+  const [sessionsError, setSessionsError] = useState<string>()
   const [sessionId, setSessionId] = useState<string>()
   const [chatTitle, setChatTitle] = useState("New chat")
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -37,8 +41,12 @@ function App() {
   const [runStatus, setRunStatus] = useState("Ready")
   const [trace, setTrace] = useState<TraceItem[]>([])
   const [files, setFiles] = useState<UiFileSummary[]>([])
-  const [preview, setPreview] = useState<{ path: string; content: string }>()
+  const [preview, setPreview] = useState<FilePreview>()
+  const [composerReferences, setComposerReferences] = useState<FileReference[]>([])
+  const [uploadError, setUploadError] = useState<string>()
   const [evidence, setEvidence] = useState<SessionEvidence>()
+  const [todos, setTodos] = useState<TodoItem[]>([])
+  const [currentTodoId, setCurrentTodoId] = useState<string>()
   const [panelOpen, setPanelOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [inspectorCollapsed, setInspectorCollapsed] = useState(false)
@@ -58,6 +66,7 @@ function App() {
   const [status, setStatus] = useState<StatusSummary>()
   const messageEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const sessionIdRef = useRef<string>()
 
   useEffect(() => {
     void refresh()
@@ -67,6 +76,10 @@ function App() {
   useEffect(() => {
     messageEndRef.current?.scrollIntoView({ block: "end" })
   }, [messages])
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId
+  }, [sessionId])
 
   async function refresh() {
     const nextStatus = await api.status()
@@ -96,31 +109,47 @@ function App() {
   }
 
   async function loadSessions() {
-    const data = await api.listSessions()
-    setSessions(data.sessions.slice(0, 18))
+    setSessionsLoading(true)
+    setSessionsError(undefined)
+    try {
+      const data = await api.listSessions()
+      setSessions(data.sessions.slice(0, 18))
+    } catch (error) {
+      setSessionsError(errorMessage(error))
+    } finally {
+      setSessionsLoading(false)
+    }
   }
 
   async function loadSession(id: string) {
     const data = await api.getSession(id)
     setSessionId(data.session.id)
+    sessionIdRef.current = data.session.id
     setChatTitle(data.session.title ?? "Chat")
     setMessages(sessionMessages(data.messages))
     setTrace(traceFromMessages(data.messages))
     setEvidence(data.evidence)
     setFiles(data.files)
+    setTodoState(data.todos)
     setPreview(undefined)
+    setComposerReferences([])
+    setUploadError(undefined)
     await loadSessions()
   }
 
   async function createSession(title = "New chat") {
     const data = await api.createSession({ title })
     setSessionId(data.session.id)
+    sessionIdRef.current = data.session.id
     setChatTitle(data.session.title ?? "New chat")
     setMessages([])
     setTrace([])
     setEvidence(undefined)
     setFiles(data.files)
+    setTodoState([])
     setPreview(undefined)
+    setComposerReferences([])
+    setUploadError(undefined)
     await loadSessions()
     return data.session.id
   }
@@ -140,26 +169,58 @@ function App() {
     setFiles(data.files)
   }
 
-  async function previewFile(path: string) {
+  async function previewFile(path: string, file?: { kind?: UiFileSummary["kind"] }) {
     if (!sessionId) return
-    const data = await api.previewFile(sessionId, path)
-    setPreview({ path: data.path, content: data.content })
     setActiveTab("files")
     setPanelOpen(true)
+    if (isPreviewUnsupported(path, file?.kind)) {
+      setPreview({
+        path,
+        status: "unsupported",
+        message: "Preview is not available for this file type yet.",
+      })
+      return
+    }
+    try {
+      const data = await api.previewFile(sessionId, path)
+      setPreview({ path: data.path, content: data.content, status: "ready" })
+    } catch (error) {
+      const message = errorMessage(error)
+      const unsupported = message.includes("Only text files") || message.includes("too large")
+      setPreview({
+        path,
+        status: unsupported ? "unsupported" : "error",
+        message: unsupported ? "Preview is not available for this file type yet." : message,
+      })
+    }
   }
 
   async function uploadFiles(fileList: FileList | null) {
     if (!fileList || fileList.length === 0) return
-    const id = await ensureSession("Uploaded files")
-    const data = await api.uploadFiles(id, fileList)
-    setFiles(data.files)
-    pushTrace({ title: "Uploaded files", detail: data.files.map((file) => file.path).join("\n") })
-    setPrompt((current) => {
-      const prefix = current.trim() ? `${current.trim()}\n` : ""
-      return `${prefix}Uploaded files:\n${data.files.map((file) => `- ${file.path}`).join("\n")}`
-    })
-    setActiveTab("files")
-    setPanelOpen(true)
+    setUploadError(undefined)
+    try {
+      const id = await ensureSession("Uploaded files")
+      const data = await api.uploadFiles(id, fileList)
+      setFiles((current) => mergeFileSummaries(data.files, current))
+      addFileReferences(
+        data.files.map((file) => ({
+          path: file.path,
+          name: fileNameFromPath(file.path),
+          source: "uploaded",
+          status: "uploaded",
+          size: file.size,
+          kind: file.kind,
+        })),
+      )
+      pushTrace({ title: "Uploaded files", detail: data.files.map((file) => file.path).join("\n") })
+      setActiveTab("files")
+      setPanelOpen(true)
+    } catch (error) {
+      const message = errorMessage(error)
+      setUploadError(message)
+      pushTrace({ title: "Upload failed", detail: message, failed: true })
+      setPanelOpen(true)
+    }
   }
 
   async function saveProvider(closeAfter: boolean) {
@@ -185,7 +246,7 @@ function App() {
   }
 
   async function sendPrompt() {
-    const message = prompt.trim()
+    const message = messageWithFileReferences(prompt.trim(), composerReferences)
     if (!message || runId) return
     if (provider && !provider.keyPresent) {
       setConfigNotice({ text: "Add an API key before sending." })
@@ -193,6 +254,8 @@ function App() {
       return
     }
     setPrompt("")
+    setComposerReferences([])
+    setUploadError(undefined)
     setMessages((current) => [...current, { role: "user", text: message }, { role: "assistant", text: "Thinking...", pending: true }])
     setRunStatus("Starting")
     try {
@@ -228,10 +291,12 @@ function App() {
         source.close()
         if (result.sessionId) {
           setSessionId(result.sessionId)
+          sessionIdRef.current = result.sessionId
           void api.getSession(result.sessionId).then((detail) => {
             setChatTitle(detail.session.title ?? "Chat")
             setEvidence(detail.evidence)
             setFiles(detail.files)
+            setTodoState(detail.todos)
           })
         }
         replacePending(result.answer || "(no answer)")
@@ -252,8 +317,13 @@ function App() {
   function applyAgentEvent(event: AgentEvent) {
     if (event.type === "session_created") {
       setSessionId(event.sessionId)
+      sessionIdRef.current = event.sessionId
       setChatTitle("Working chat")
       void loadSessions()
+    }
+    if (todoUpdateMatchesSession(event, sessionIdRef.current)) {
+      setTodos(event.todos)
+      setCurrentTodoId(event.currentTodoId ?? currentTodoIdFromTodos(event.todos))
     }
     if (event.type === "llm_text_delta") appendAssistantDelta(event.text)
     if (event.type === "message") replacePending(event.content)
@@ -266,7 +336,16 @@ function App() {
     }
     if (event.type === "tool_result") pushTrace({ title: `${event.ok ? "ok" : "failed"} ${event.name}`, detail: event.content, kind: "result", failed: !event.ok })
     if (event.type === "error") pushTrace({ title: "agent error", detail: event.message, failed: true })
-    if (event.type === "finish") setSessionId(event.sessionId)
+    if (event.type === "finish") {
+      setSessionId(event.sessionId)
+      sessionIdRef.current = event.sessionId
+    }
+  }
+
+  function setTodoState(nextTodos: TodoItem[] | undefined) {
+    const normalized = normalizeTodos(nextTodos)
+    setTodos(normalized)
+    setCurrentTodoId(currentTodoIdFromTodos(normalized))
   }
 
   function appendAssistantDelta(text: string) {
@@ -314,6 +393,52 @@ function App() {
     setPanelOpen(true)
   }
 
+  function addFileReferences(nextReferences: FileReference[]) {
+    setComposerReferences((current) => {
+      const next = [...current]
+      for (const reference of nextReferences) {
+        const index = next.findIndex((item) => item.path === reference.path && item.source === reference.source)
+        if (index >= 0) {
+          next[index] = { ...next[index], ...reference }
+        } else {
+          next.push(reference)
+        }
+      }
+      return next
+    })
+  }
+
+  function referenceFile(file: UiFileSummary, source: FileReferenceSource = "workspace") {
+    addFileReferences([
+      {
+        path: file.path,
+        name: fileNameFromPath(file.path),
+        source,
+        status: "referenced",
+        size: file.size,
+        kind: file.kind,
+      },
+    ])
+  }
+
+  function removeComposerReference(reference: FileReference) {
+    setComposerReferences((current) => current.filter((item) => !(item.path === reference.path && item.source === reference.source)))
+  }
+
+  function messageWithFileReferences(message: string, references: FileReference[]) {
+    if (!references.length) return message
+    const lines = references.map((reference) => `- ${reference.path} (${reference.source})`)
+    const block = `Referenced files:\n${lines.join("\n")}`
+    return message ? `${message}\n\n${block}` : block
+  }
+
+  function mergeFileSummaries(primary: UiFileSummary[], secondary: UiFileSummary[]) {
+    const byPath = new Map<string, UiFileSummary>()
+    for (const file of secondary) byPath.set(file.path, file)
+    for (const file of primary) byPath.set(file.path, file)
+    return [...byPath.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  }
+
   return (
     <WorkbenchLayout
       sidebarCollapsed={sidebarCollapsed}
@@ -324,6 +449,9 @@ function App() {
           sessionId={sessionId}
           providerReady={providerReady}
           workspace={status?.workspace}
+          status={status}
+          sessionsLoading={sessionsLoading}
+          sessionsError={sessionsError}
           collapsed={sidebarCollapsed}
           onToggleCollapsed={() => setSidebarCollapsed((collapsed) => !collapsed)}
           onNewChat={() => void createSession("New chat")}
@@ -339,6 +467,8 @@ function App() {
           permissionMode={permissionMode}
           runStatus={runStatus}
           providerReady={providerReady}
+          todos={todos}
+          currentTodoId={currentTodoId}
           inspectorCollapsed={inspectorCollapsed}
           onOpenStatus={() => openInspector("status")}
           onOpenActivity={() => openInspector("trace")}
@@ -373,6 +503,17 @@ function App() {
         runStatus={runStatus}
         runId={runId}
         cancelRun={cancelRun}
+        composerReferences={composerReferences}
+        uploadError={uploadError}
+        removeComposerReference={removeComposerReference}
+        previewReference={(reference) => void previewFile(reference.path, reference)}
+        files={files}
+        trace={trace}
+        evidence={evidence}
+        todos={todos}
+        currentTodoId={currentTodoId}
+        openInspector={openInspector}
+        previewFile={(file) => void previewFile(file.path, file)}
       />
       <RightInspector
         open={panelOpen}
@@ -385,7 +526,10 @@ function App() {
         preview={preview}
         evidence={evidence}
         status={status}
-        onPreview={(path) => void previewFile(path)}
+        todos={todos}
+        currentTodoId={currentTodoId}
+        onPreview={(file) => void previewFile(file.path, file)}
+        onReference={referenceFile}
       />
     </WorkbenchLayout>
   )

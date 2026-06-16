@@ -69,6 +69,20 @@ export function formatSize(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
+export function pathBasename(value: string | undefined) {
+  const normalized = String(value ?? "").replace(/[\\/]+$/, "")
+  if (!normalized) return ""
+  return normalized.split(/[\\/]/).filter(Boolean).pop() ?? normalized
+}
+
+export function fileNameFromPath(value: string) {
+  return pathBasename(value) || value
+}
+
+export function isPreviewUnsupported(path: string, kind?: "text" | "binary") {
+  return kind === "binary" || /\.pdf$/i.test(path)
+}
+
 export function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error)
 }

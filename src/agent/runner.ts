@@ -7,7 +7,8 @@ import type { ToolContext } from "../tools/types"
 import type { ToolRegistry } from "../tools/registry"
 import type { AgentEvent } from "./events"
 import { approximateTokens, compactMessages } from "./compaction"
-import type { JsonObject } from "../shared/json"
+import type { JsonObject, JsonValue } from "../shared/json"
+import type { TodoItem, TodoPriority, TodoStatus } from "../todo/types"
 
 export type AgentRunnerOptions = {
   llm: LLMClient
@@ -167,6 +168,11 @@ export class AgentRunner {
             content: result.content,
           } satisfies AgentEvent
           yield result.metadata ? { ...toolEvent, metadata: result.metadata } : toolEvent
+          const todoEvent = todoUpdatedEvent(session.id, result.ok, result.metadata)
+          if (todoEvent) {
+            await this.options.sessions.updateTodos(session.id, todoEvent.todos)
+            yield todoEvent
+          }
         }
         continue
       }
@@ -271,4 +277,48 @@ function estimateLLMInputTokens(messages: LLMMessage[]) {
     const toolCallTokens = message.toolCalls?.reduce((sum, call) => sum + approximateTokens(`${call.name} ${JSON.stringify(call.input)}`), 0) ?? 0
     return total + approximateTokens(`${message.role}\n${message.content}`) + toolCallTokens
   }, 0)
+}
+
+function todoUpdatedEvent(sessionId: string, ok: boolean, metadata: JsonObject | undefined): Extract<AgentEvent, { type: "todo_updated" }> | undefined {
+  if (!ok) return undefined
+  const todos = todosFromMetadata(metadata)
+  if (!todos) return undefined
+  const currentTodo = todos.find((todo) => todo.status === "in_progress")
+  return {
+    type: "todo_updated",
+    sessionId,
+    todos,
+    ...(currentTodo ? { currentTodoId: currentTodo.id } : {}),
+  }
+}
+
+function todosFromMetadata(metadata: JsonObject | undefined): TodoItem[] | undefined {
+  const value = metadata?.todos
+  if (!Array.isArray(value)) return undefined
+  const todos: TodoItem[] = []
+  for (const item of value) {
+    const todo = todoFromJson(item)
+    if (!todo) return undefined
+    todos.push(todo)
+  }
+  return todos
+}
+
+function todoFromJson(value: JsonValue): TodoItem | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  const id = value.id
+  const content = value.content
+  const status = value.status
+  const priority = value.priority
+  if (typeof id !== "string" || typeof content !== "string") return undefined
+  if (!isTodoStatus(status) || !isTodoPriority(priority)) return undefined
+  return { id, content, status, priority }
+}
+
+function isTodoStatus(value: JsonValue | undefined): value is TodoStatus {
+  return value === "pending" || value === "in_progress" || value === "completed" || value === "cancelled"
+}
+
+function isTodoPriority(value: JsonValue | undefined): value is TodoPriority {
+  return value === "high" || value === "medium" || value === "low"
 }

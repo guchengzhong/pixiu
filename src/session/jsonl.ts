@@ -3,12 +3,14 @@ import { dirname, join } from "node:path"
 
 import { createID } from "../shared/id"
 import { PixiuError } from "../shared/errors"
-import type { CreateSessionInput, SessionMessage, SessionRecord, SessionStore } from "./types"
+import type { TodoItem } from "../todo/types"
+import type { CreateSessionInput, SessionMessage, SessionRecord, SessionStore, SessionTodoState } from "./types"
 
 type SessionLine =
   | { type: "session"; session: SessionRecord }
   | { type: "message"; message: SessionMessage }
   | { type: "update"; patch: Partial<SessionRecord> }
+  | { type: "todo_state"; state: SessionTodoState }
 
 export class JsonlSessionStore implements SessionStore {
   constructor(private readonly rootDir: string) {}
@@ -60,6 +62,20 @@ export class JsonlSessionStore implements SessionStore {
     return (await this.readFile(sessionId)).messages
   }
 
+  async getTodos(sessionId: string) {
+    return (await this.getTodoState(sessionId)).todos
+  }
+
+  async getTodoState(sessionId: string) {
+    return (await this.readFile(sessionId)).todoState
+  }
+
+  async updateTodos(sessionId: string, todos: TodoItem[]) {
+    const session = await this.getSession(sessionId)
+    if (!session) throw new PixiuError(`Unknown session: ${sessionId}`, { code: "SESSION_NOT_FOUND" })
+    await this.appendLine(sessionId, { type: "todo_state", state: todoStateFrom(todos) })
+  }
+
   async listSessions() {
     await mkdir(this.rootDir, { recursive: true })
     const files = await readdir(this.rootDir)
@@ -86,12 +102,13 @@ export class JsonlSessionStore implements SessionStore {
     try {
       content = await readFile(path, "utf8")
     } catch (cause: any) {
-      if (cause?.code === "ENOENT") return { session: undefined, messages: [] as SessionMessage[] }
+      if (cause?.code === "ENOENT") return { session: undefined, messages: [] as SessionMessage[], todoState: { todos: [] } as SessionTodoState }
       throw cause
     }
 
     let session: SessionRecord | undefined
     const messages: SessionMessage[] = []
+    let todoState: SessionTodoState = { todos: [] }
     const lines = content.split(/\r?\n/)
     for (let index = 0; index < lines.length; index += 1) {
       const raw = lines[index]
@@ -108,8 +125,24 @@ export class JsonlSessionStore implements SessionStore {
       if (line.type === "session") session = line.session
       if (line.type === "message") messages.push(line.message)
       if (line.type === "update" && session) session = { ...session, ...line.patch }
+      if (line.type === "todo_state") todoState = cloneTodoState(line.state)
     }
-    return { session, messages }
+    return { session, messages, todoState }
+  }
+}
+
+function todoStateFrom(todos: TodoItem[]): SessionTodoState {
+  const currentTodo = todos.find((todo) => todo.status === "in_progress")
+  return {
+    todos: todos.map((todo) => ({ ...todo })),
+    ...(currentTodo ? { currentTodoId: currentTodo.id } : {}),
+  }
+}
+
+function cloneTodoState(state: SessionTodoState): SessionTodoState {
+  return {
+    todos: Array.isArray(state.todos) ? state.todos.map((todo) => ({ ...todo })) : [],
+    ...(state.currentTodoId ? { currentTodoId: state.currentTodoId } : {}),
   }
 }
 

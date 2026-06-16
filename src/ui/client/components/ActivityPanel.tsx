@@ -1,9 +1,11 @@
 import type { SessionEvidence } from "../../../session/evidence"
+import type { TodoItem } from "../../../todo/types"
 import type { UiFileSummary } from "../../shared/api"
-import type { InspectorTab, StatusSummary, TraceItem } from "../types"
+import type { FilePreview, FileReferenceSource, InspectorTab, StatusSummary, TraceItem } from "../types"
 import { EvidencePanel } from "./EvidencePanel"
+import { ExecutionTimeline } from "./ExecutionTimeline"
 import { StatusPanel } from "./StatusPanel"
-import { TraceList } from "./TraceList"
+import { TodoProgress } from "./TodoProgress"
 import { WorkspaceFiles } from "./WorkspaceFiles"
 
 export function ActivityPanel(props: {
@@ -14,10 +16,13 @@ export function ActivityPanel(props: {
   close(): void
   trace: TraceItem[]
   files: UiFileSummary[]
-  preview: { path: string; content: string } | undefined
+  preview: FilePreview | undefined
   evidence: SessionEvidence | undefined
   status: StatusSummary | undefined
-  onPreview(path: string): void
+  todos: TodoItem[]
+  currentTodoId: string | undefined
+  onPreview(file: UiFileSummary): void
+  onReference(file: UiFileSummary, source: FileReferenceSource): void
 }) {
   return (
     <aside className={`workspace-panel workbench-inspector ${props.open ? "open" : ""} ${props.collapsed ? "inspector-collapsed-panel" : ""}`}>
@@ -33,8 +38,21 @@ export function ActivityPanel(props: {
         ))}
       </div>
       <div className="panel-body">
-        {props.activeTab === "trace" ? <TraceList trace={props.trace} /> : null}
-        {props.activeTab === "files" ? <WorkspaceFiles files={props.files} preview={props.preview} onPreview={props.onPreview} /> : null}
+        {props.activeTab === "trace" ? (
+          <div className="activity-tab">
+            <TodoProgress todos={props.todos} currentTodoId={props.currentTodoId} />
+            <ExecutionTimeline trace={props.trace} />
+          </div>
+        ) : null}
+        {props.activeTab === "files" ? (
+          <WorkspaceFiles
+            files={props.files}
+            preview={props.preview}
+            evidence={props.evidence}
+            onPreview={props.onPreview}
+            onReference={props.onReference}
+          />
+        ) : null}
         {props.activeTab === "evidence" ? <EvidencePanel evidence={props.evidence} /> : null}
         {props.activeTab === "status" ? <StatusPanel status={props.status} /> : null}
       </div>

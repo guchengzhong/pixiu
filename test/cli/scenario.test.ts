@@ -53,6 +53,7 @@ describe("scenario harness", () => {
           "context_usage",
           "tool_call",
           "tool_result",
+          "todo_updated",
           "context_usage",
           "llm_text_delta",
           "message",

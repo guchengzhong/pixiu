@@ -363,6 +363,54 @@ describe("ui server", () => {
     }
   })
 
+  test("session detail includes persisted todos", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-session-todos-"))
+    const llm = await createFakeLLMServer()
+    llm.tool("todowrite", {
+      todos: [
+        { id: "plan", content: "Plan work", status: "completed", priority: "high" },
+        { id: "verify", content: "Verify work", status: "in_progress", priority: "medium" },
+      ],
+    })
+    llm.text("FINAL: todos saved")
+    await writeFile(
+      join(root, "pixiu.jsonc"),
+      JSON.stringify({
+        model: "fake/model",
+        providers: {
+          "openai-compatible": {
+            baseURL: llm.url,
+            apiKey: "sk-test",
+            model: "fake/model",
+          },
+        },
+      }),
+      "utf8",
+    )
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const response = await ui.fetch("http://127.0.0.1/api/runs?wait=1", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ message: "track todos", permissionMode: "acceptEdits" }),
+      })
+      const body = await json(response)
+      const detail = await json(await ui.fetch(`http://127.0.0.1/api/sessions/${body.data.sessionId}`, {
+        headers: { authorization: "Bearer test-token" },
+      }))
+
+      expect(response.status).toBe(200)
+      expect(body.data.events.some((event: any) => event.type === "todo_updated" && event.currentTodoId === "verify")).toBe(true)
+      expect(detail.data.todos).toEqual([
+        { id: "plan", content: "Plan work", status: "completed", priority: "high" },
+        { id: "verify", content: "Verify work", status: "in_progress", priority: "medium" },
+      ])
+    } finally {
+      await ui.close()
+      await llm.close()
+    }
+  })
+
   test("streams run events over SSE", async () => {
     const root = await mkdtemp(join(tmpdir(), "pixiu-ui-run-sse-"))
     const llm = await createFakeLLMServer()
