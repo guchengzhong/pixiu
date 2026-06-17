@@ -1,5 +1,6 @@
 import type { RefObject } from "react"
 
+import { isActiveRunStatus, type RunStatus } from "../../../run/status"
 import { formatSize, maybeSend } from "../helpers"
 import type { FileReference } from "../types"
 
@@ -12,6 +13,7 @@ export function Composer({
   permissionMode,
   setPermissionMode,
   runStatus,
+  runStatusLabel,
   runId,
   cancelRun,
   attachments,
@@ -26,7 +28,8 @@ export function Composer({
   uploadFiles(fileList: FileList | null): Promise<void>
   permissionMode: string
   setPermissionMode(value: string): void
-  runStatus: string
+  runStatus: RunStatus
+  runStatusLabel: string
   runId: string | undefined
   cancelRun(): Promise<void>
   attachments: FileReference[]
@@ -34,7 +37,8 @@ export function Composer({
   onPreviewAttachment(reference: FileReference): void
   onRemoveAttachment(reference: FileReference): void
 }) {
-  const canSend = Boolean(prompt.trim() || attachments.length) && !runId
+  const active = isActiveRunStatus(runStatus)
+  const canSend = Boolean(prompt.trim() || attachments.length) && !active
 
   return (
     <div className="composer-shell">
@@ -94,10 +98,10 @@ export function Composer({
               <option value="bypassPermissions">bypass</option>
             </select>
             {permissionMode === "bypassPermissions" ? <span className="warning">bypass enabled</span> : null}
-            <span className="run-status">{runStatus}</span>
+            <span className={`run-status run-status-${runStatus}`}>{runStatusLabel}</span>
           </div>
-          {runId ? <button className="ghost" type="button" onClick={() => void cancelRun()}>Cancel</button> : null}
-          <button className="send" type="button" title="Send" disabled={!canSend} onClick={() => void sendPrompt()}>↑</button>
+          {runId && active ? <button className="ghost" type="button" onClick={() => void cancelRun()}>Cancel</button> : null}
+          <button className="send" type="button" title={active ? runStatusLabel : "Send"} disabled={!canSend} onClick={() => void sendPrompt()}>↑</button>
         </div>
       </div>
     </div>

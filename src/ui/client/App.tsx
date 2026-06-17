@@ -2,9 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
 
 import type { AgentEvent } from "../../agent/events"
+import { limitActivityItems } from "../../activity/format"
 import type { SessionEvidence } from "../../session/evidence"
 import type { TodoItem } from "../../todo/types"
-import type { UiFileSummary, UiProviderSummary, UiSessionSummary } from "../shared/api"
+import type { ActivityUpdatedEvent, RunStatusEvent, UiFileSummary, UiProviderSummary, UiRunResult, UiSessionSummary } from "../shared/api"
+import { isActiveRunStatus, isTerminalRunStatus, normalizePersistedRunStatus, normalizeRunStatus, runStatusLabel, type RunStatus } from "../../run/status"
 import { createUiApiClient, resolveUiToken, type ProviderConfigPayload } from "./api"
 import { AppSidebar } from "./components/AppSidebar"
 import { ChatPane } from "./components/ChatPane"
@@ -14,9 +16,20 @@ import { RightInspector } from "./components/RightInspector"
 import { TopBar } from "./components/TopBar"
 import { WorkbenchLayout } from "./components/WorkbenchLayout"
 import { ENDPOINTS } from "./constants"
-import { errorMessage, fileNameFromPath, isPreviewUnsupported, presetForBaseURL, sessionMessages, traceFromMessages } from "./helpers"
+import {
+  assistantTextFromRunResult,
+  errorMessage,
+  failureMessageFromAgentEvent,
+  failureMessageFromRunErrorEvent,
+  fileNameFromPath,
+  isPreviewUnsupported,
+  presetForBaseURL,
+  sessionMessages,
+  streamDisconnectMessage,
+  traceFromMessages,
+} from "./helpers"
 import { currentTodoIdFromTodos, normalizeTodos, todoUpdateMatchesSession } from "./todos"
-import type { ChatMessage, FilePreview, FileReference, FileReferenceSource, InspectorTab, PermissionView, StatusSummary, TraceItem } from "./types"
+import type { ActivityItem, ChatMessage, FilePreview, FileReference, FileReferenceSource, InspectorTab, PermissionView, StatusSummary, TraceItem } from "./types"
 import "./styles.css"
 
 declare global {
@@ -38,8 +51,9 @@ function App() {
   const [prompt, setPrompt] = useState("")
   const [permissionMode, setPermissionMode] = useState("acceptEdits")
   const [runId, setRunId] = useState<string>()
-  const [runStatus, setRunStatus] = useState("Ready")
+  const [runStatus, setRunStatus] = useState<RunStatus>("idle")
   const [trace, setTrace] = useState<TraceItem[]>([])
+  const [activity, setActivity] = useState<ActivityItem[]>([])
   const [files, setFiles] = useState<UiFileSummary[]>([])
   const [preview, setPreview] = useState<FilePreview>()
   const [composerReferences, setComposerReferences] = useState<FileReference[]>([])
@@ -66,7 +80,15 @@ function App() {
   const [status, setStatus] = useState<StatusSummary>()
   const messageEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const sessionIdRef = useRef<string>()
+  const sessionIdRef = useRef<string | undefined>(undefined)
+  const statusSummary = useMemo(
+    () => ({
+      ...(status ?? {}),
+      runStatus,
+      runStatusLabel: runStatusLabel(runStatus),
+    }),
+    [runStatus, status],
+  )
 
   useEffect(() => {
     void refresh()
@@ -128,9 +150,11 @@ function App() {
     setChatTitle(data.session.title ?? "Chat")
     setMessages(sessionMessages(data.messages))
     setTrace(traceFromMessages(data.messages))
+    setActivity(data.activity)
     setEvidence(data.evidence)
     setFiles(data.files)
     setTodoState(data.todos)
+    setRunStatus(normalizePersistedRunStatus(data.session.finishStatus))
     setPreview(undefined)
     setComposerReferences([])
     setUploadError(undefined)
@@ -144,9 +168,11 @@ function App() {
     setChatTitle(data.session.title ?? "New chat")
     setMessages([])
     setTrace([])
+    setActivity([])
     setEvidence(undefined)
     setFiles(data.files)
     setTodoState([])
+    setRunStatus("idle")
     setPreview(undefined)
     setComposerReferences([])
     setUploadError(undefined)
@@ -247,7 +273,7 @@ function App() {
 
   async function sendPrompt() {
     const message = messageWithFileReferences(prompt.trim(), composerReferences)
-    if (!message || runId) return
+    if (!message || isActiveRunStatus(runStatus)) return
     if (provider && !provider.keyPresent) {
       setConfigNotice({ text: "Add an API key before sending." })
       setConfigOpen(true)
@@ -257,29 +283,54 @@ function App() {
     setComposerReferences([])
     setUploadError(undefined)
     setMessages((current) => [...current, { role: "user", text: message }, { role: "assistant", text: "Thinking...", pending: true }])
-    setRunStatus("Starting")
+    setRunStatus("queued")
     try {
       const started = await api.startRun({ message, ...(sessionId ? { sessionId } : {}), permissionMode })
       setRunId(started.runId)
+      setRunStatus(normalizeRunStatus(started.status) ?? "queued")
       await subscribeRun(started.runId)
     } catch (error) {
       replacePending(`Error: ${errorMessage(error)}`)
       pushTrace({ title: "Error", detail: errorMessage(error), failed: true })
+      setRunStatus("error")
       setPanelOpen(true)
     } finally {
       setRunId(undefined)
-      setRunStatus("Ready")
+      setRunStatus((current) => isActiveRunStatus(current) ? "idle" : current)
     }
   }
 
   function subscribeRun(id: string) {
     return new Promise<void>((resolve, reject) => {
       const source = api.eventSource(id)
-      source.addEventListener("run", (event) => {
-        const data = JSON.parse(event.data) as { status?: string }
-        setRunStatus(data.status ?? "Running")
+      let settled = false
+      let lastFailure: string | undefined
+      source.addEventListener("run_status", (event) => {
+        const data = JSON.parse(event.data) as RunStatusEvent
+        setRunStatus(data.status)
+        if (isTerminalRunStatus(data.status)) setPermission(undefined)
+        if (data.sessionId) {
+          setSessionId(data.sessionId)
+          sessionIdRef.current = data.sessionId
+        }
       })
-      source.addEventListener("agent_event", (event) => applyAgentEvent(JSON.parse(event.data) as AgentEvent))
+      source.addEventListener("run", (event) => {
+        const data = JSON.parse(event.data) as { status?: unknown; runStatus?: unknown }
+        const status = normalizeRunStatus(data.runStatus) ?? normalizeRunStatus(data.status)
+        if (status) setRunStatus(status)
+      })
+      source.addEventListener("activity_updated", (event) => {
+        const data = JSON.parse(event.data) as ActivityUpdatedEvent
+        setActivity((current) => mergeActivityItems(current, data.activity))
+        setActiveTab("trace")
+        setPanelOpen(true)
+      })
+      source.addEventListener("agent_event", (event) => {
+        const agentEvent = JSON.parse(event.data) as AgentEvent
+        const failure = failureMessageFromAgentEvent(agentEvent)
+        if (failure) lastFailure = failure
+        applyAgentEvent(agentEvent)
+      })
       source.addEventListener("permission_request", (event) => {
         setPermission(JSON.parse(event.data) as PermissionView)
       })
@@ -287,8 +338,11 @@ function App() {
         pushTrace({ title: "permission", detail: JSON.stringify(JSON.parse(event.data), null, 2), kind: "permission" })
       })
       source.addEventListener("result", (event) => {
-        const result = JSON.parse(event.data) as { sessionId?: string; answer?: string; status: string; finishReason?: string }
+        const result = JSON.parse(event.data) as UiRunResult
+        settled = true
         source.close()
+        setRunStatus(normalizeRunStatus(result.status) ?? "idle")
+        setPermission(undefined)
         if (result.sessionId) {
           setSessionId(result.sessionId)
           sessionIdRef.current = result.sessionId
@@ -297,19 +351,27 @@ function App() {
             setEvidence(detail.evidence)
             setFiles(detail.files)
             setTodoState(detail.todos)
+            setActivity(detail.activity)
           })
         }
-        replacePending(result.answer || "(no answer)")
+        replacePending(assistantTextFromRunResult(result, lastFailure))
         pushTrace({
           title: "Run finished",
           detail: `status: ${result.status}\nfinishReason: ${result.finishReason ?? "unknown"}\nsessionId: ${result.sessionId ?? "new"}`,
+          failed: result.status === "error" || result.status === "cancelled",
         })
         void loadSessions()
         resolve()
       })
-      source.onerror = () => {
+      source.onerror = (event) => {
+        const failure = failureMessageFromRunErrorEvent(event)
+        if (failure) {
+          lastFailure = failure
+          return
+        }
         source.close()
-        reject(new Error("Run event stream disconnected."))
+        if (settled) return
+        reject(new Error(streamDisconnectMessage(lastFailure)))
       }
     })
   }
@@ -327,7 +389,6 @@ function App() {
     }
     if (event.type === "llm_text_delta") appendAssistantDelta(event.text)
     if (event.type === "message") replacePending(event.content)
-    if (event.type === "context_usage") setRunStatus(`${event.source} tokens ${event.inputTokens}`)
     if (event.type === "assistant_progress_delta") pushTrace({ title: "progress", detail: event.text, kind: "thinking" })
     if (event.type === "tool_call") {
       pushTrace({ title: `tool ${event.name}`, detail: JSON.stringify(event.input, null, 2), kind: "call" })
@@ -382,7 +443,7 @@ function App() {
   async function cancelRun() {
     if (!runId) return
     await api.cancelRun(runId)
-    setRunStatus("Cancelling")
+    setRunStatus("cancelled")
   }
 
   const providerReady = provider?.keyPresent === true
@@ -439,6 +500,12 @@ function App() {
     return [...byPath.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
   }
 
+  function mergeActivityItems(current: ActivityItem[], incoming: ActivityItem[]) {
+    const byId = new Map(current.map((item) => [item.id, item]))
+    for (const item of incoming) byId.set(item.id, item)
+    return limitActivityItems([...byId.values()])
+  }
+
   return (
     <WorkbenchLayout
       sidebarCollapsed={sidebarCollapsed}
@@ -448,8 +515,8 @@ function App() {
           sessions={sessions}
           sessionId={sessionId}
           providerReady={providerReady}
-          workspace={status?.workspace}
-          status={status}
+          workspace={statusSummary.workspace}
+          status={statusSummary}
           sessionsLoading={sessionsLoading}
           sessionsError={sessionsError}
           collapsed={sidebarCollapsed}
@@ -462,10 +529,11 @@ function App() {
       topBar={
         <TopBar
           chatTitle={chatTitle}
-          cwd={status?.cwd}
+          cwd={statusSummary.cwd}
           model={provider?.model}
           permissionMode={permissionMode}
           runStatus={runStatus}
+          runStatusLabel={runStatusLabel(runStatus)}
           providerReady={providerReady}
           todos={todos}
           currentTodoId={currentTodoId}
@@ -501,6 +569,7 @@ function App() {
         permissionMode={permissionMode}
         setPermissionMode={setPermissionMode}
         runStatus={runStatus}
+        runStatusLabel={runStatusLabel(runStatus)}
         runId={runId}
         cancelRun={cancelRun}
         composerReferences={composerReferences}
@@ -509,6 +578,7 @@ function App() {
         previewReference={(reference) => void previewFile(reference.path, reference)}
         files={files}
         trace={trace}
+        activity={activity}
         evidence={evidence}
         todos={todos}
         currentTodoId={currentTodoId}
@@ -522,10 +592,11 @@ function App() {
         setActiveTab={setActiveTab}
         close={() => { setPanelOpen(false); setInspectorCollapsed(true) }}
         trace={trace}
+        activity={activity}
         files={files}
         preview={preview}
         evidence={evidence}
-        status={status}
+        status={statusSummary}
         todos={todos}
         currentTodoId={currentTodoId}
         onPreview={(file) => void previewFile(file.path, file)}

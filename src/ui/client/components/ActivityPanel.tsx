@@ -1,9 +1,10 @@
 import type { SessionEvidence } from "../../../session/evidence"
 import type { TodoItem } from "../../../todo/types"
 import type { UiFileSummary } from "../../shared/api"
-import type { FilePreview, FileReferenceSource, InspectorTab, StatusSummary, TraceItem } from "../types"
+import type { ActivityItem, FilePreview, FileReferenceSource, InspectorTab, StatusSummary, TraceItem } from "../types"
 import { EvidencePanel } from "./EvidencePanel"
 import { ExecutionTimeline } from "./ExecutionTimeline"
+import { SemanticActivityList } from "./SemanticActivityList"
 import { StatusPanel } from "./StatusPanel"
 import { TodoProgress } from "./TodoProgress"
 import { WorkspaceFiles } from "./WorkspaceFiles"
@@ -15,6 +16,7 @@ export function ActivityPanel(props: {
   setActiveTab(tab: InspectorTab): void
   close(): void
   trace: TraceItem[]
+  activity: ActivityItem[]
   files: UiFileSummary[]
   preview: FilePreview | undefined
   evidence: SessionEvidence | undefined
@@ -41,7 +43,17 @@ export function ActivityPanel(props: {
         {props.activeTab === "trace" ? (
           <div className="activity-tab">
             <TodoProgress todos={props.todos} currentTodoId={props.currentTodoId} />
-            <ExecutionTimeline trace={props.trace} />
+            {props.activity.length ? (
+              <>
+                <SemanticActivityList activity={props.activity} />
+                <details className="raw-trace-disclosure">
+                  <summary>Raw Details</summary>
+                  <ExecutionTimeline trace={props.trace} />
+                </details>
+              </>
+            ) : (
+              <ExecutionTimeline trace={props.trace} />
+            )}
           </div>
         ) : null}
         {props.activeTab === "files" ? (

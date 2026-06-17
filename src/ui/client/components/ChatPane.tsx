@@ -2,10 +2,11 @@ import { useState, type DragEvent, type RefObject } from "react"
 
 import type { SessionEvidence } from "../../../session/evidence"
 import type { TodoItem } from "../../../todo/types"
+import type { RunStatus } from "../../../run/status"
 import type { UiFileSummary } from "../../shared/api"
 import { SUGGESTIONS } from "../constants"
 import { redactUiText } from "../redact"
-import type { ChatMessage, FileReference, InspectorTab, TraceItem } from "../types"
+import type { ActivityItem, ChatMessage, FileReference, InspectorTab, TraceItem } from "../types"
 import { Composer } from "./Composer"
 import { StructuredCards } from "./StructuredCards"
 
@@ -20,6 +21,7 @@ export function ChatPane({
   permissionMode,
   setPermissionMode,
   runStatus,
+  runStatusLabel,
   runId,
   cancelRun,
   composerReferences,
@@ -28,6 +30,7 @@ export function ChatPane({
   previewReference,
   files,
   trace,
+  activity,
   evidence,
   todos,
   currentTodoId,
@@ -43,7 +46,8 @@ export function ChatPane({
   uploadFiles(fileList: FileList | null): Promise<void>
   permissionMode: string
   setPermissionMode(value: string): void
-  runStatus: string
+  runStatus: RunStatus
+  runStatusLabel: string
   runId: string | undefined
   cancelRun(): Promise<void>
   composerReferences: FileReference[]
@@ -52,6 +56,7 @@ export function ChatPane({
   previewReference(reference: FileReference): void
   files: UiFileSummary[]
   trace: TraceItem[]
+  activity: ActivityItem[]
   evidence: SessionEvidence | undefined
   todos: TodoItem[]
   currentTodoId: string | undefined
@@ -131,10 +136,12 @@ export function ChatPane({
           files={files}
           composerReferences={composerReferences}
           trace={trace}
+          activity={activity}
           evidence={evidence}
           todos={todos}
           currentTodoId={currentTodoId}
           runStatus={runStatus}
+          runStatusLabel={runStatusLabel}
           runId={runId}
           permissionMode={permissionMode}
           onOpenInspector={openInspector}
@@ -151,6 +158,7 @@ export function ChatPane({
         permissionMode={permissionMode}
         setPermissionMode={setPermissionMode}
         runStatus={runStatus}
+        runStatusLabel={runStatusLabel}
         runId={runId}
         cancelRun={cancelRun}
         attachments={composerReferences}

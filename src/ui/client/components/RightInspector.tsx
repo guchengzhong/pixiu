@@ -1,7 +1,7 @@
 import type { SessionEvidence } from "../../../session/evidence"
 import type { TodoItem } from "../../../todo/types"
 import type { UiFileSummary } from "../../shared/api"
-import type { FilePreview, FileReferenceSource, InspectorTab, StatusSummary, TraceItem } from "../types"
+import type { ActivityItem, FilePreview, FileReferenceSource, InspectorTab, StatusSummary, TraceItem } from "../types"
 import { ActivityPanel } from "./ActivityPanel"
 
 export function RightInspector(props: {
@@ -11,6 +11,7 @@ export function RightInspector(props: {
   setActiveTab(tab: InspectorTab): void
   close(): void
   trace: TraceItem[]
+  activity: ActivityItem[]
   files: UiFileSummary[]
   preview: FilePreview | undefined
   evidence: SessionEvidence | undefined

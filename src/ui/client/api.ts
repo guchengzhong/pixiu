@@ -1,5 +1,6 @@
 import type {
   ApiResponse,
+  RunStatus,
   UiConfigResponse,
   UiFileSummary,
   UiProviderSummary,
@@ -20,8 +21,8 @@ export type UiApiClient = {
   listFiles(sessionId: string): Promise<{ files: UiFileSummary[] }>
   previewFile(sessionId: string, path: string): Promise<{ path: string; size: number; updatedAt: string; content: string }>
   uploadFiles(sessionId: string, files: FileList | File[]): Promise<{ files: UiFileSummary[] }>
-  startRun(input: { message: string; sessionId?: string; permissionMode: string }): Promise<{ runId: string; status: string }>
-  cancelRun(runId: string): Promise<{ runId: string; status: string }>
+  startRun(input: { message: string; sessionId?: string; permissionMode: string }): Promise<{ runId: string; status: RunStatus }>
+  cancelRun(runId: string): Promise<{ runId: string; status: RunStatus }>
   answerPermission(id: string, input: { action: "allow" | "deny"; scope: "once" | "sessionSimilar" }): Promise<{ id: string; action: string }>
   eventSource(runId: string): EventSource
 }
@@ -98,12 +99,12 @@ export function createUiApiClient(token: string, fetchImpl: UiFetch = fetch): Ui
       return body.data
     },
     startRun: (input) =>
-      requestJson<{ runId: string; status: string }>("/api/runs", {
+      requestJson<{ runId: string; status: RunStatus }>("/api/runs", {
         method: "POST",
         body: JSON.stringify(input),
       }),
     cancelRun: (runId) =>
-      requestJson<{ runId: string; status: string }>(`/api/runs/${encodeURIComponent(runId)}/cancel`, {
+      requestJson<{ runId: string; status: RunStatus }>(`/api/runs/${encodeURIComponent(runId)}/cancel`, {
         method: "POST",
         body: "{}",
       }),

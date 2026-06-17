@@ -3,7 +3,12 @@ import type { JsonValue } from "../../shared/json"
 import type { SessionEvidence } from "../../session/evidence"
 import type { SessionMessage } from "../../session/types"
 import type { AgentEvent } from "../../agent/events"
+import type { ActivityItem, ActivityUpdatedEvent } from "../../activity/types"
 import type { TodoItem } from "../../todo/types"
+import type { RunStatus, RunStatusEvent, TerminalRunStatus } from "../../run/status"
+
+export type { RunStatus, RunStatusEvent, TerminalRunStatus } from "../../run/status"
+export type { ActivityItem, ActivityKind, ActivityMetadata, ActivitySource, ActivityStatus, ActivityUpdatedEvent } from "../../activity/types"
 
 export type ApiSuccess<T> = {
   ok: true
@@ -65,7 +70,7 @@ export type UiSessionSummary = {
   updatedAt: string
   title?: string
   model?: string
-  finishStatus?: string
+  finishStatus?: TerminalRunStatus
   workspaceDir?: string
   summaryApproxTokens: number
 }
@@ -83,12 +88,15 @@ export type UiSessionDetail = {
   evidence: SessionEvidence
   files: UiFileSummary[]
   todos: TodoItem[]
+  activity: ActivityItem[]
 }
 
-export type UiRunStatus = "queued" | "running" | "waiting_permission" | "done" | "error" | "cancelled"
+export type UiRunStatus = RunStatus
 
 export type UiRunEvent =
-  | { event: "run"; data: { runId: string; status: UiRunStatus } }
+  | { event: "run_status"; data: RunStatusEvent }
+  | { event: "run"; data: { runId: string; status: string; runStatus: UiRunStatus } }
+  | { event: "activity_updated"; data: ActivityUpdatedEvent }
   | { event: "agent_event"; data: AgentEvent }
   | { event: "permission_request"; data: unknown }
   | { event: "permission_result"; data: unknown }
@@ -97,7 +105,7 @@ export type UiRunEvent =
 
 export type UiRunResult = {
   runId: string
-  status: UiRunStatus
+  status: TerminalRunStatus
   sessionId?: string
   answer: string
   finishReason: string

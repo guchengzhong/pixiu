@@ -1,19 +1,23 @@
 import type { SessionEvidence } from "../../../session/evidence"
 import type { TodoItem } from "../../../todo/types"
+import type { RunStatus } from "../../../run/status"
 import type { UiFileSummary } from "../../shared/api"
+import { isPrimaryActivity } from "../activity"
 import { fileNameFromPath } from "../helpers"
 import { todoProgress } from "../todos"
-import type { ChatMessage, FileReference, InspectorTab, TraceItem } from "../types"
+import type { ActivityItem, ChatMessage, FileReference, InspectorTab, TraceItem } from "../types"
 
 type StructuredCardsProps = {
   messages: ChatMessage[]
   files: UiFileSummary[]
   composerReferences: FileReference[]
   trace: TraceItem[]
+  activity: ActivityItem[]
   evidence: SessionEvidence | undefined
   todos: TodoItem[]
   currentTodoId: string | undefined
-  runStatus: string
+  runStatus: RunStatus
+  runStatusLabel: string
   runId: string | undefined
   permissionMode: string
   onOpenInspector(tab: InspectorTab): void
@@ -25,19 +29,21 @@ export function StructuredCards({
   files,
   composerReferences,
   trace,
+  activity,
   evidence,
   todos,
   currentTodoId,
   runStatus,
+  runStatusLabel,
   runId,
   permissionMode,
   onOpenInspector,
   onPreviewFile,
 }: StructuredCardsProps) {
   const referencedFiles = referencedFileSummaries(messages, composerReferences, files)
-  const toolSummary = summarizeTools(trace)
+  const toolSummary = summarizeTools(trace, activity)
   const artifacts = evidence?.artifacts ?? []
-  const skills = skillNames(trace)
+  const skills = skillNames(trace, activity)
   const failedTrace = trace.find((item) => item.failed)
   const progress = todoProgress(todos, currentTodoId)
 
@@ -114,11 +120,11 @@ export function StructuredCards({
         <div className="card-head">
           <span>Progress</span>
           <strong className={runId ? "live" : progress.total && progress.completed === progress.total ? "ok" : failedTrace ? "bad" : ""}>
-            {progress.total ? `${progress.completed}/${progress.total}` : runId ? "Running" : "Ready"}
+            {progress.total ? `${progress.completed}/${progress.total}` : runId ? runStatusLabel : "Ready"}
           </strong>
         </div>
         <button className="card-body-action" type="button" onClick={() => onOpenInspector("trace")}>
-          <span title={progress.current?.content ?? runStatus}>{progress.current?.content ?? runStatus}</span>
+          <span title={progress.current?.content ?? runStatusLabel}>{progress.current?.content ?? runStatusLabel}</span>
           <small>{progress.total ? "open Activity progress" : `${permissionMode} · open Activity`}</small>
         </button>
       </section>
@@ -187,7 +193,17 @@ function fileSummaryFromPath(path: string): UiFileSummary {
   }
 }
 
-function summarizeTools(trace: TraceItem[]) {
+function summarizeTools(trace: TraceItem[], activity: ActivityItem[]) {
+  if (activity.length) {
+    const visibleActivity = activity.filter(isPrimaryActivity)
+    const toolItems = visibleActivity.filter((item) => item.toolName || item.kind === "tool" || item.kind === "shell" || item.kind === "file" || item.kind === "search")
+    const names = [...new Set(toolItems.map((item) => item.toolName ?? item.kind).filter(Boolean))].slice(0, 3)
+    return {
+      total: toolItems.length,
+      failed: visibleActivity.filter((item) => item.status === "error").length,
+      names: names.length ? names : ["activity"],
+    }
+  }
   const calls = trace.filter((item) => item.kind === "call" || item.title.startsWith("tool "))
   const names = [...new Set(calls.map((item) => item.title.replace(/^tool\s+/, "").trim()).filter(Boolean))].slice(0, 3)
   return {
@@ -197,8 +213,12 @@ function summarizeTools(trace: TraceItem[]) {
   }
 }
 
-function skillNames(trace: TraceItem[]) {
+function skillNames(trace: TraceItem[], activity: ActivityItem[]) {
   const names = new Set<string>()
+  for (const item of activity) {
+    if (item.kind === "skill" && item.target) names.add(item.target.split("/")[0] ?? item.target)
+    if (item.toolName?.includes("skill") && item.target) names.add(item.target.split("/")[0] ?? item.target)
+  }
   for (const item of trace) {
     const value = `${item.title}\n${item.detail ?? ""}`
     const skillMatch = value.match(/\bskill(?:s|_name|Name)?["':\s]+([a-z0-9_.-]+)/i)

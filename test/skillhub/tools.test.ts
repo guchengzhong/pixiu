@@ -33,6 +33,7 @@ describe("SkillHub tools", () => {
       expect(result.ok).toBe(true)
       expect(result.content).toContain("Manifest:")
       expect(result.metadata?.manifestPath).toBe(join(cwd, "skills", "demo", ".source.json"))
+      expect(result.metadata?.activity).toMatchObject({ kind: "artifact", title: "Installed skill", target: join(cwd, "skills", "demo") })
       const manifest = JSON.parse(await readFile(join(cwd, "skills", "demo", ".source.json"), "utf8"))
       expect(manifest.remote.id).toBe("demo")
     } finally {

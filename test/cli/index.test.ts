@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test"
-import { runCli } from "../../src/cli/index"
+import { clearTerminalSequence, runCli } from "../../src/cli/index"
 
 describe("runCli", () => {
+  test("clear terminal sequence clears both viewport and scrollback by default", () => {
+    expect(clearTerminalSequence()).toBe("\x1b[H\x1b[2J\x1b[3J\x1b[H")
+    expect(clearTerminalSequence({ clearScrollback: false })).toBe("\x1b[H\x1b[2J\x1b[H")
+  })
+
   test("prints help", async () => {
     const result = await runCli(["--help"])
 

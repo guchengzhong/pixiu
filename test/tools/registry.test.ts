@@ -26,6 +26,19 @@ async function context(root: string, autoApprove = true) {
 }
 
 describe("tool registry and builtins", () => {
+  test("LLM tool schemas expose optional Pixiu activity intent without changing execution validation", async () => {
+    const registry = new ToolRegistry().registerMany(createBuiltinTools())
+    const shellSchema = registry.toLLMTools(["shell"])[0]?.inputSchema
+    const executionSchema = registry.get("shell")?.inputSchema
+
+    expect(shellSchema?.properties?._activity).toMatchObject({
+      type: "object",
+      description: expect.stringContaining("Pixiu-only"),
+    })
+    expect(shellSchema?.properties?.command).toMatchObject({ type: "string" })
+    expect(executionSchema?.properties?._activity).toBeUndefined()
+  })
+
   test("read tool returns clear file content", async () => {
     const root = await mkdtemp(join(tmpdir(), "pixiu-tools-"))
     await writeFile(join(root, "note.txt"), "hello world", "utf8")
@@ -34,6 +47,11 @@ describe("tool registry and builtins", () => {
     const result = await registry.execute("read", { path: "note.txt" }, await context(root))
     expect(result.ok).toBe(true)
     expect(result.content).toContain("hello world")
+    expect(result.metadata?.activity).toMatchObject({
+      kind: "file",
+      title: "Read file",
+      target: "note.txt",
+    })
   })
 
   test("invalid input returns model-correctable error", async () => {
@@ -87,6 +105,12 @@ describe("tool registry and builtins", () => {
     })
     expect(typeof result.metadata?.durationMs).toBe("number")
     expect(result.metadata?.stdoutBytes).toBe(5)
+    expect(result.metadata?.activity).toMatchObject({
+      kind: "shell",
+      status: "success",
+      title: "Ran command",
+      command: "printf hello",
+    })
   })
 
   test("shell denies obvious writes outside the workspace", async () => {
@@ -98,6 +122,11 @@ describe("tool registry and builtins", () => {
     expect(result.ok).toBe(false)
     expect(result.content).toContain("outside the workspace")
     expect(result.metadata?.outsideWorkspaceTarget).toBe("../outside.txt")
+    expect(result.metadata?.activity).toMatchObject({
+      kind: "shell",
+      status: "error",
+      title: "Command failed",
+    })
   })
 
   test("shell can write temporary files under .pixiu/tmp", async () => {

@@ -1,4 +1,5 @@
 import { createID } from "../shared/id"
+import { stripToolActivityInput } from "../activity/format"
 import { formatError } from "../shared/errors"
 import type { LLMClient, LLMMessage } from "../llm/types"
 import type { SessionRecord, SessionStore } from "../session/types"
@@ -120,6 +121,10 @@ export class AgentRunner {
           }
         }
       } catch (error) {
+        if ((input.signal ?? this.options.signal)?.aborted || isAbortError(error)) {
+          yield { type: "finish", reason: "cancelled", sessionId: session.id }
+          return
+        }
         const message = formatError(error)
         await this.options.sessions.appendMessage({
           sessionId: session.id,
@@ -137,24 +142,32 @@ export class AgentRunner {
           role: "assistant",
           parts: [
             ...(assistantText ? [{ type: "text" as const, text: assistantText }] : []),
-            ...toolCalls.map((call) => ({ type: "tool_call" as const, id: call.id, name: call.name, input: call.input })),
+            ...toolCalls.map((call) => ({ type: "tool_call" as const, id: call.id, name: call.name, input: stripToolActivityInput(call.input) })),
           ],
         })
         continuationMessages.length = 0
         draftContinuations = 0
 
         for (const call of toolCalls) {
+          const signal = input.signal ?? this.options.signal
+          if (signal?.aborted) {
+            yield { type: "finish", reason: "cancelled", sessionId: session.id }
+            return
+          }
           const baseToolContext = this.options.toolContextForSession?.(session) ?? this.options.toolContext
           const toolContext = {
             ...baseToolContext,
             sessionId: session.id,
           }
-          const signal = input.signal ?? this.options.signal
           const result = await this.options.tools.execute(
             call.name,
-            call.input,
+            stripToolActivityInput(call.input),
             signal ? { ...toolContext, signal } : toolContext,
           )
+          if (signal?.aborted) {
+            yield { type: "finish", reason: "cancelled", sessionId: session.id }
+            return
+          }
           await this.options.sessions.appendMessage({
             sessionId: session.id,
             role: "tool",
@@ -252,6 +265,8 @@ export class AgentRunner {
 const AGENT_COMPLETION_PROTOCOL = [
   "Completion protocol:",
   "If the user asks for work that requires files, commands, live data, or other external state, call tools instead of describing what you will do.",
+  "When calling a tool, you may include a Pixiu-only `_activity` object to describe the concise user-visible intent of that tool call. `_activity.title` should describe what you are trying to do, not the raw command. Keep it factual, omit secrets, and use it only when it improves readability. The runtime strips `_activity` before executing tools.",
+  "Examples: shell {\"command\":\"npm run typecheck\",\"_activity\":{\"kind\":\"shell\",\"title\":\"Running TypeScript type check\",\"summary\":\"Checking the project for TypeScript errors\"}}; read {\"path\":\"src/agent/runner.ts\",\"_activity\":{\"kind\":\"file\",\"title\":\"Reading agent runner implementation\",\"summary\":\"Inspecting how Pixiu handles tool events\"}}.",
   "Only produce the final user-facing answer when the task is complete.",
   "Every final answer must begin with `FINAL:`. Text that does not begin with `FINAL:` is treated as a draft once; after one continuation request, the runner may use the next text response as the answer to avoid an endless loop.",
 ].join("\n")
@@ -270,6 +285,12 @@ function mergeSessionSummary(existing: string | undefined, next: string) {
   if (incoming.includes(current)) return incoming
   if (current.includes(incoming)) return current
   return `${current}\n\n${incoming}`
+}
+
+function isAbortError(error: unknown) {
+  if (!error || typeof error !== "object") return false
+  const item = error as { name?: unknown; code?: unknown }
+  return item.name === "AbortError" || item.code === "ABORT_ERR" || item.code === "ERR_ABORTED"
 }
 
 function estimateLLMInputTokens(messages: LLMMessage[]) {

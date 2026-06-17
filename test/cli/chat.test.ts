@@ -209,4 +209,24 @@ describe("pixiu chat subprocess", () => {
       expect(result.stdout).toContain("second ok")
     })
   })
+
+  test("Ctrl-C cancels an active chat run without printing AbortError", async () => {
+    await withPixiuFixture(async ({ llm, spawn }) => {
+      llm.hang()
+      const handle = spawn(["chat", "--no-color"], {
+        input: "hang please\n/exit\n",
+        timeoutMs: 5_000,
+      })
+
+      await llm.wait(1, { timeoutMs: 1_000 })
+      handle.kill("SIGINT")
+      const result = await handle.result()
+
+      expectExit(result, 0, "chat SIGINT cancel")
+      expect(result.stdout).toContain("Cancelled current run.")
+      expect(result.stdout).toContain("Press Ctrl-C again to exit.")
+      expect(result.stdout).not.toContain("AbortError")
+      expect(result.stdout).not.toContain("error AbortError")
+    })
+  })
 })

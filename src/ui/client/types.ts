@@ -1,3 +1,5 @@
+import type { ActivityItem, RunStatus } from "../shared/api"
+
 export type TraceItem = {
   id: string
   title: string
@@ -57,4 +59,9 @@ export type StatusSummary = {
     disabled?: number
   }
   providerKeyPresent?: boolean
+  runStatus?: RunStatus
+  runStatusLabel?: string
 }
+
+export type { RunStatus } from "../shared/api"
+export type { ActivityItem } from "../shared/api"

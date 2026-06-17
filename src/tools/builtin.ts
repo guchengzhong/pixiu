@@ -132,7 +132,17 @@ export function createBuiltinTools(): ToolDefinition[] {
         return {
           ok: true,
           content: truncated.text,
-          metadata: { path: guarded.relativePath, bytes: truncated.bytes, truncated: truncated.truncated },
+          metadata: {
+            path: guarded.relativePath,
+            bytes: truncated.bytes,
+            truncated: truncated.truncated,
+            activity: {
+              kind: "file",
+              title: "Read file",
+              summary: `Read ${guarded.relativePath}`,
+              target: guarded.relativePath,
+            },
+          },
         }
       },
     },
@@ -155,7 +165,23 @@ export function createBuiltinTools(): ToolDefinition[] {
         for await (const file of new Bun.Glob(pattern).scan({ cwd, onlyFiles: true })) {
           files.push(relative(context.workspaceRoot, `${cwd}/${file}`))
         }
-        return { ok: true, content: files.join("\n"), data: files }
+        return {
+          ok: true,
+          content: files.join("\n"),
+          data: files,
+          metadata: {
+            pattern,
+            cwd: relative(context.workspaceRoot, cwd) || ".",
+            resultCount: files.length,
+            activity: {
+              kind: "search",
+              title: "Listed files",
+              summary: `Listed ${pattern}`,
+              target: pattern,
+              details: { resultCount: files.length },
+            },
+          },
+        }
       },
     },
     {
@@ -196,7 +222,22 @@ export function createBuiltinTools(): ToolDefinition[] {
             if (results.length >= maxResults) break
           }
         }
-        return { ok: true, content: results.join("\n") || "No matches", data: results }
+        return {
+          ok: true,
+          content: results.join("\n") || "No matches",
+          data: results,
+          metadata: {
+            query,
+            resultCount: results.length,
+            activity: {
+              kind: "search",
+              title: "Searched files",
+              summary: `Searched for ${query}`,
+              target: query,
+              details: { resultCount: results.length },
+            },
+          },
+        }
       },
     },
     {
@@ -225,6 +266,14 @@ export function createBuiltinTools(): ToolDefinition[] {
               cwd,
               workspaceRoot: context.workspaceRoot,
               outsideWorkspaceTarget: outsideTarget,
+              activity: {
+                kind: "shell",
+                title: "Command failed",
+                summary: `Failed ${command}`,
+                command,
+                status: "error",
+                details: { outsideWorkspaceTarget: outsideTarget },
+              },
             },
           }
         }
@@ -253,6 +302,18 @@ export function createBuiltinTools(): ToolDefinition[] {
             stderrBytes: result.stderrBytes,
             stdoutTruncated: result.stdoutTruncated,
             stderrTruncated: result.stderrTruncated,
+            activity: {
+              kind: "shell",
+              title: result.exitCode === 0 && !result.timedOut ? "Ran command" : "Command failed",
+              summary: result.exitCode === 0 && !result.timedOut ? `Ran ${command}` : `Failed ${command}`,
+              command,
+              status: result.exitCode === 0 && !result.timedOut ? "success" : "error",
+              details: {
+                exitCode: result.exitCode ?? -1,
+                timedOut: result.timedOut,
+                durationMs: result.durationMs,
+              },
+            },
           },
         }
       },
@@ -282,7 +343,15 @@ export function createBuiltinTools(): ToolDefinition[] {
         return {
           ok: true,
           content: summarizeDiff(guarded.relativePath, before, stringField(input, "content")),
-          metadata: { path: guarded.relativePath },
+          metadata: {
+            path: guarded.relativePath,
+            activity: {
+              kind: "file",
+              title: "Updated file",
+              summary: `Updated ${guarded.relativePath}`,
+              target: guarded.relativePath,
+            },
+          },
         }
       },
     },
@@ -303,10 +372,37 @@ export function createBuiltinTools(): ToolDefinition[] {
         const guarded = await resolveToolPath("edit", stringField(input, "path"), context)
         const before = await readFile(guarded.absolutePath, "utf8")
         const oldText = stringField(input, "oldText")
-        if (!before.includes(oldText)) return { ok: false, content: `oldText not found in ${guarded.relativePath}` }
+        if (!before.includes(oldText)) {
+          return {
+            ok: false,
+            content: `oldText not found in ${guarded.relativePath}`,
+            metadata: {
+              path: guarded.relativePath,
+              activity: {
+                kind: "file",
+                title: "File edit failed",
+                summary: `Could not edit ${guarded.relativePath}`,
+                target: guarded.relativePath,
+                status: "error",
+              },
+            },
+          }
+        }
         const after = before.replace(oldText, stringField(input, "newText"))
         await writeFile(guarded.absolutePath, after, "utf8")
-        return { ok: true, content: summarizeDiff(guarded.relativePath, before, after), metadata: { path: guarded.relativePath } }
+        return {
+          ok: true,
+          content: summarizeDiff(guarded.relativePath, before, after),
+          metadata: {
+            path: guarded.relativePath,
+            activity: {
+              kind: "file",
+              title: "Edited file",
+              summary: `Edited ${guarded.relativePath}`,
+              target: guarded.relativePath,
+            },
+          },
+        }
       },
     },
     {
@@ -343,7 +439,15 @@ export function createBuiltinTools(): ToolDefinition[] {
           ok: true,
           content: items.length ? items.map((item, index) => `${index + 1}. ${item}`).join("\n") : "No todo items provided.",
           data: items,
-          metadata: { todos },
+          metadata: {
+            todos,
+            activity: {
+              kind: "system",
+              title: "Updated todos",
+              summary: `Updated ${todos.length} todo${todos.length === 1 ? "" : "s"}`,
+              details: { count: todos.length },
+            },
+          },
         }
       },
     },
@@ -376,7 +480,15 @@ export function createBuiltinTools(): ToolDefinition[] {
         return {
           ok: true,
           content: renderTodos(todos),
-          metadata: { todos },
+          metadata: {
+            todos,
+            activity: {
+              kind: "system",
+              title: "Updated todos",
+              summary: `Updated ${todos.length} todo${todos.length === 1 ? "" : "s"}`,
+              details: { count: todos.length },
+            },
+          },
         }
       },
     },

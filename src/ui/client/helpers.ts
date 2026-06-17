@@ -1,5 +1,6 @@
 import type { KeyboardEvent } from "react"
 
+import type { AgentEvent } from "../../agent/events"
 import type { MessagePart, SessionMessage } from "../../session/types"
 import { ENDPOINTS } from "./constants"
 import type { TraceItem } from "./types"
@@ -85,4 +86,49 @@ export function isPreviewUnsupported(path: string, kind?: "text" | "binary") {
 
 export function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error)
+}
+
+export type RunResultLike = {
+  answer?: string
+  status?: unknown
+  finishReason?: string
+  error?: string
+}
+
+export function failureMessageFromAgentEvent(event: AgentEvent) {
+  if (event.type === "error") return compactFailureDetail(event.message)
+  if (event.type !== "tool_result" || event.ok) return undefined
+  const detail = compactFailureDetail(event.content)
+  return detail.includes("\n")
+    ? `${event.name} failed:\n${detail}`
+    : `${event.name} failed${detail ? `: ${detail}` : ""}`
+}
+
+export function assistantTextFromRunResult(result: RunResultLike, fallbackFailure?: string) {
+  if (typeof result.answer === "string" && result.answer.trim()) return result.answer
+  if (result.status === "error") return `Error: ${result.error || fallbackFailure || "Run failed."}`
+  if (result.status === "cancelled") return "Cancelled."
+  if (result.finishReason === "error" && fallbackFailure) return `Error: ${fallbackFailure}`
+  return "(no answer)"
+}
+
+export function streamDisconnectMessage(fallbackFailure?: string) {
+  return fallbackFailure || "Run event stream disconnected."
+}
+
+export function failureMessageFromRunErrorEvent(event: Event) {
+  const data = event instanceof MessageEvent ? event.data : (event as { data?: unknown }).data
+  if (typeof data !== "string" || !data.trim()) return undefined
+  try {
+    const parsed = JSON.parse(data) as { message?: unknown }
+    return typeof parsed.message === "string" ? compactFailureDetail(parsed.message) : undefined
+  } catch {
+    return compactFailureDetail(data)
+  }
+}
+
+function compactFailureDetail(value: string) {
+  const text = value.replace(/\r\n?/g, "\n").trim()
+  if (text.length <= 1200) return text
+  return `${text.slice(0, 1200).trimEnd()}...`
 }

@@ -162,6 +162,37 @@ describe("agent runner", () => {
     expect(events.some((event) => event.type === "message")).toBe(false)
   })
 
+  test("treats AbortError from the provider as a cancelled run", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-agent-abort-"))
+    const controller = new AbortController()
+    const runner = new AgentRunner({
+      llm: {
+        async *stream() {
+          controller.abort()
+          throw new DOMException("The operation was aborted.", "AbortError")
+        },
+      },
+      tools: new ToolRegistry(),
+      sessions: new MemorySessionStore(),
+      model: "scripted",
+      systemPrompt: "test",
+      maxSteps: 4,
+      toolContext: {
+        cwd: root,
+        workspaceRoot: root,
+        permissions: new StaticPermissionManager([{ tool: "*", action: "allow" }]),
+        pathGuard: new PathGuard({ workspaceRoot: root, workspaceOnly: true }),
+        config: { shellTimeoutMs: 500, outputMaxBytes: 4_000, envAllowlist: ["PATH"] },
+      },
+    })
+
+    const events = []
+    for await (const event of runner.run({ message: "go", signal: controller.signal })) events.push(event)
+
+    expect(events.some((event) => event.type === "error")).toBe(false)
+    expect(events.at(-1)).toMatchObject({ type: "finish", reason: "cancelled" })
+  })
+
   test("continues when the assistant returns a non-final draft", async () => {
     const root = await mkdtemp(join(tmpdir(), "pixiu-agent-continue-"))
     const runner = new AgentRunner({
@@ -322,6 +353,28 @@ describe("agent runner", () => {
     expect(events.some((event) => event.type === "tool_result" && event.name === "echo" && event.ok)).toBe(true)
     expect(events.some((event) => event.type === "todo_updated")).toBe(false)
     expect(events.some((event) => event.type === "message" && event.content === "done")).toBe(true)
+  })
+
+  test("strips Pixiu-only _activity before tool execution and persisted tool messages", async () => {
+    const { events, sessions } = await runScriptedTool("echo", {
+      text: "ping",
+      _activity: {
+        kind: "tool",
+        title: "Pinging echo tool",
+      },
+    }, echoTools())
+    const sessionId = events.find((event) => event.type === "session_created")?.sessionId
+    const result = events.find((event) => event.type === "tool_result" && event.name === "echo")
+    const toolCall = events.find((event) => event.type === "tool_call" && event.name === "echo")
+    const messages = await sessions.readMessages(sessionId!)
+    const storedCall = messages.flatMap((message) => message.parts).find((part) => part.type === "tool_call")
+
+    expect(toolCall).toMatchObject({
+      type: "tool_call",
+      input: expect.objectContaining({ _activity: expect.any(Object) }),
+    })
+    expect(result).toMatchObject({ type: "tool_result", content: "ping" })
+    expect(storedCall).toMatchObject({ type: "tool_call", input: { text: "ping" } })
   })
 
   test("legacy todo metadata is also promoted to todo_updated", async () => {

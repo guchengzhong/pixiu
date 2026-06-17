@@ -1,9 +1,13 @@
 import { describe, expect, test } from "bun:test"
 
 import { createUiApiClient, resolveUiToken } from "../../src/ui/client/api"
+import { groupActivityForDisplay, isPrimaryActivity } from "../../src/ui/client/activity"
+import { assistantTextFromRunResult, failureMessageFromAgentEvent, streamDisconnectMessage } from "../../src/ui/client/helpers"
 import { redactUiText } from "../../src/ui/client/redact"
 import { deriveExecutionTimeline, summarizeShellCommand } from "../../src/ui/client/timeline"
 import { currentTodoIdFromTodos, normalizeTodos, todoMarker, todoProgress, todoUpdateMatchesSession } from "../../src/ui/client/todos"
+import { isActiveRunStatus, normalizePersistedRunStatus, normalizeRunStatus, runStatusLabel } from "../../src/run/status"
+import { activityFromToolResult, activityStatusMarker, normalizeActivityItems } from "../../src/activity/format"
 import type { AgentEvent } from "../../src/agent/events"
 import type { TodoItem } from "../../src/todo/types"
 
@@ -44,6 +48,103 @@ describe("ui client", () => {
     const client = createUiApiClient("local-token", async () => Response.json({ ok: false, code: "NOPE", message: "broken" }, { status: 500 }))
 
     await expect(client.status()).rejects.toThrow("broken")
+  })
+
+  test("normalizes and labels run status values", () => {
+    expect(normalizeRunStatus("waiting_permission")).toBe("waiting_for_permission")
+    expect(normalizeRunStatus("done")).toBe("idle")
+    expect(normalizePersistedRunStatus("running")).toBe("idle")
+    expect(normalizePersistedRunStatus("waiting_for_permission")).toBe("idle")
+    expect(isActiveRunStatus("queued")).toBe(true)
+    expect(isActiveRunStatus("idle")).toBe(false)
+    expect(runStatusLabel("queued")).toBe("Starting")
+    expect(runStatusLabel("running")).toBe("Working")
+    expect(runStatusLabel("waiting_for_permission")).toBe("Waiting for permission")
+    expect(runStatusLabel("idle")).toBe("Ready")
+    expect(runStatusLabel("error")).toBe("Error")
+    expect(runStatusLabel("cancelled")).toBe("Cancelled")
+  })
+
+  test("prefers real agent failures over generic stream disconnect copy", () => {
+    const toolFailure = failureMessageFromAgentEvent({
+      type: "tool_result",
+      id: "call_web",
+      name: "web_search",
+      ok: false,
+      content: "fetch failed: 503 Service Unavailable",
+    })
+    const agentFailure = failureMessageFromAgentEvent({ type: "error", message: "Provider request failed" })
+
+    expect(toolFailure).toBe("web_search failed: fetch failed: 503 Service Unavailable")
+    expect(agentFailure).toBe("Provider request failed")
+    expect(streamDisconnectMessage(toolFailure)).toBe("web_search failed: fetch failed: 503 Service Unavailable")
+    expect(streamDisconnectMessage()).toBe("Run event stream disconnected.")
+  })
+
+  test("renders error run results from result.error or the last tool failure", () => {
+    expect(assistantTextFromRunResult({ answer: "final answer", status: "error", finishReason: "error", error: "hidden" })).toBe("final answer")
+    expect(assistantTextFromRunResult({ answer: "", status: "error", finishReason: "error", error: "Provider failed" })).toBe("Error: Provider failed")
+    expect(assistantTextFromRunResult({ answer: "", status: "error", finishReason: "error" }, "web_search failed: timeout")).toBe(
+      "Error: web_search failed: timeout",
+    )
+    expect(assistantTextFromRunResult({ answer: "", status: "cancelled", finishReason: "cancelled" })).toBe("Cancelled.")
+    expect(assistantTextFromRunResult({ answer: "", status: "idle", finishReason: "stop" })).toBe("(no answer)")
+  })
+
+  test("normalizes semantic activity and rejects run lifecycle statuses", () => {
+    const activity = normalizeActivityItems([
+      { id: "read", kind: "file", status: "success", title: "Read file", target: "README.md" },
+      { id: "perm", kind: "permission", status: "running", title: "Waiting for permission" },
+      { id: "queued", kind: "system", status: "queued", title: "Starting" },
+      { id: "bad", status: "idle", title: "Ready" },
+    ])
+
+    expect(activity).toEqual([
+      { id: "read", kind: "file", status: "success", title: "Read file", target: "README.md" },
+      { id: "perm", kind: "permission", status: "running", title: "Waiting for permission" },
+    ])
+    expect(activityStatusMarker("success")).toBe("✓")
+    expect(activityStatusMarker("error")).toBe("✕")
+    expect(activityFromToolResult({ toolCallId: "call", toolName: "unknown_tool", ok: true }).title).toBe("Used tool: unknown_tool")
+  })
+
+  test("groups activity so intent items lead and raw-ish run details are secondary", () => {
+    const weather = {
+      id: "weather",
+      kind: "search" as const,
+      status: "success" as const,
+      title: "Checked 武汉 weather",
+      summary: "Fetched current weather data from wttr.in",
+      source: "fallback" as const,
+    }
+    const command = {
+      id: "cmd",
+      kind: "shell" as const,
+      status: "success" as const,
+      title: "Ran command",
+      summary: "Ran python3 /tmp/parse_weather.py",
+      command: "python3 /tmp/parse_weather.py",
+      source: "tool_metadata" as const,
+    }
+    const permission = {
+      id: "perm",
+      kind: "permission" as const,
+      status: "success" as const,
+      title: "Permission approved",
+    }
+    const tempFile = {
+      id: "tmp",
+      kind: "file" as const,
+      status: "success" as const,
+      title: "Updated file",
+      target: "../../../../tmp/parse_weather.py",
+    }
+
+    const grouped = groupActivityForDisplay([permission, weather, command, tempFile])
+
+    expect(isPrimaryActivity(weather)).toBe(true)
+    expect(grouped.primary.map((item) => item.id)).toEqual(["weather"])
+    expect(grouped.secondary.map((item) => item.id)).toEqual(["tmp", "cmd", "perm"])
   })
 
   test("redacts common secret shapes before rendering trace text", () => {
@@ -220,7 +321,7 @@ describe("ui client", () => {
       {
         id: "run",
         title: "Run finished",
-        detail: "status: done\nfinishReason: stop\nsessionId: session_123",
+        detail: "status: idle\nfinishReason: stop\nsessionId: session_123",
       },
       {
         id: "permission",

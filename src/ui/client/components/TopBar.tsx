@@ -1,4 +1,5 @@
 import type { TodoItem } from "../../../todo/types"
+import type { RunStatus } from "../../../run/status"
 import { pathBasename } from "../helpers"
 import { todoProgress } from "../todos"
 
@@ -8,6 +9,7 @@ export function TopBar({
   model,
   permissionMode,
   runStatus,
+  runStatusLabel,
   providerReady,
   todos,
   currentTodoId,
@@ -20,7 +22,8 @@ export function TopBar({
   cwd: string | undefined
   model: string | undefined
   permissionMode: string
-  runStatus: string
+  runStatus: RunStatus
+  runStatusLabel: string
   providerReady: boolean
   todos: TodoItem[]
   currentTodoId: string | undefined
@@ -47,7 +50,7 @@ export function TopBar({
         <span className="pill topbar-path" title={cwd ?? "project"}>{cwd ?? "project"}</span>
         <span className="pill" title="Current model">{model ?? "model"}</span>
         <span className="pill" title="Permission mode">{permissionMode}</span>
-        <span className="pill" title="Run status">{runStatus}</span>
+        <span className={`pill run-status-${runStatus}`} title="Run status">{runStatusLabel}</span>
         {progress.total ? (
           <span className="pill current-task" title={progress.current?.content ?? "Task progress"}>
             {progress.completed}/{progress.total} tasks

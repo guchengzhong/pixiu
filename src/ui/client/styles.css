@@ -201,6 +201,24 @@ button:disabled { cursor: default; }
 .panel-body { min-height: 0; overflow: auto; padding: 12px; }
 .tab-panel { display: grid; gap: 10px; align-content: start; }
 .activity-tab { display: grid; gap: 10px; align-content: start; }
+.semantic-activity { min-width: 0; display: grid; gap: 8px; }
+.semantic-activity-list { min-width: 0; display: grid; gap: 8px; }
+.semantic-activity-item { min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: #fff; overflow: hidden; }
+.semantic-activity-item[open] { border-color: var(--line-strong); }
+.semantic-activity-summary { min-width: 0; cursor: pointer; display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; align-items: start; padding: 9px; list-style: none; }
+.semantic-activity-summary::-webkit-details-marker { display: none; }
+.semantic-activity-success .timeline-marker { color: var(--ok); background: rgba(15, 143, 111, .08); }
+.semantic-activity-running .timeline-marker, .semantic-activity-pending .timeline-marker { color: var(--primary); background: rgba(37, 99, 235, .08); }
+.semantic-activity-error { border-color: #efb5ae; }
+.semantic-activity-error .timeline-marker { color: var(--danger); background: #fff7f6; }
+.semantic-activity-skipped .timeline-marker, .semantic-activity-cancelled .timeline-marker { color: var(--warn); background: rgba(183, 121, 31, .08); }
+.semantic-activity-secondary { opacity: .82; }
+.semantic-activity-secondary .timeline-title { color: var(--muted); font-weight: 650; }
+.semantic-activity-list.compact { gap: 6px; padding-top: 8px; }
+.activity-detail-group { border: 1px dashed var(--line-strong); border-radius: 8px; background: #fff; padding: 8px; }
+.activity-detail-group > summary { cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; list-style: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.activity-detail-group > summary::-webkit-details-marker { display: none; }
+.activity-detail-group > summary span { min-width: 22px; height: 20px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface-alt); color: var(--muted); display: inline-grid; place-items: center; font-size: 11px; letter-spacing: 0; }
 .execution-timeline { min-width: 0; display: grid; gap: 8px; }
 .timeline-section-head { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; font-weight: 700; }
 .timeline-section-head strong { min-width: 22px; height: 20px; border-radius: 999px; border: 1px solid var(--line); background: #fff; color: var(--muted); display: inline-grid; place-items: center; font-size: 11px; letter-spacing: 0; }

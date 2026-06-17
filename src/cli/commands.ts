@@ -6,7 +6,7 @@ export type ChatCommandDefinition = {
 
 export const CHAT_COMMANDS = [
   { name: "/help", description: "Show slash commands and shortcuts.", aliases: ["?"] },
-  { name: "/clear", description: "Hide the visible transcript and redraw the startup panel." },
+  { name: "/clear", description: "Clear the terminal screen while keeping session context." },
   { name: "/compact", description: "Summarize older conversation turns while keeping recent context." },
   { name: "/paste", description: "Enter multiline input; finish with '.', cancel with /cancel." },
   { name: "/tools", description: "List available tools." },

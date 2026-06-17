@@ -3,6 +3,16 @@ import { access, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promi
 import { basename, isAbsolute, join, relative, resolve } from "node:path"
 
 import { approximateTokens } from "../../agent/compaction"
+import {
+  activityFromToolIntent,
+  activityFromToolResult,
+  limitActivityItems,
+  normalizeActivityItems,
+  normalizePersistedActivityItems,
+  stableActivityId,
+  updateActivityWithToolResult,
+} from "../../activity/format"
+import type { ActivityItem, ActivityUpdatedEvent } from "../../activity/types"
 import type { PixiuConfig } from "../../config/defaults"
 import { resolveProviderConfig } from "../../config/loader"
 import { OpenAICompatibleClient } from "../../llm/openai"
@@ -19,6 +29,14 @@ import { PathGuard } from "../../sandbox/path"
 import { createID } from "../../shared/id"
 import { redactSecrets } from "../../shared/redact"
 import { inspectMCPServers } from "../../mcp/status"
+import {
+  isTerminalRunStatus,
+  normalizePersistedRunStatus,
+  type RunStatus,
+  type RunStatusEvent,
+  type RunStatusPhase,
+  type TerminalRunStatus,
+} from "../../run/status"
 
 export const DEFAULT_UI_HOST = "127.0.0.1"
 export const DEFAULT_UI_PORT = 2208
@@ -92,8 +110,6 @@ type UiFileSummary = {
 
 type Server = ReturnType<typeof Bun.serve>
 
-type UiRunStatus = "queued" | "running" | "waiting_permission" | "done" | "error" | "cancelled"
-
 type UiRunRecord = {
   id: string
   input: {
@@ -101,8 +117,11 @@ type UiRunRecord = {
     sessionId?: string
     permissionMode: PermissionMode
   }
-  status: UiRunStatus
+  status: RunStatus
+  statusEvents: RunStatusEvent[]
+  activity: ActivityItem[]
   events: AgentEvent[]
+  toolCalls: Map<string, Extract<AgentEvent, { type: "tool_call" }>>
   controller: AbortController
   answer: string
   finishReason: string
@@ -122,7 +141,7 @@ type UiPendingPermission = {
 
 type UiRunResult = {
   runId: string
-  status: UiRunStatus
+  status: TerminalRunStatus
   sessionId?: string
   answer: string
   finishReason: string
@@ -303,6 +322,7 @@ async function routeApi(request: Request, url: URL, context: UiServerContext): P
       evidence: collectSessionEvidence(messages),
       files: await listSessionFiles(session),
       todos: await runtime.sessions.getTodos(session.id),
+      activity: sessionActivity(session),
     }))
   }
 
@@ -326,6 +346,10 @@ async function routeApi(request: Request, url: URL, context: UiServerContext): P
     if (!run) return jsonResponse(apiFailure("RUN_NOT_FOUND", "Unknown run."), 404)
     run.controller.abort()
     denyPendingPermissions(run, "cancelled")
+    if (!isRunTerminal(run)) {
+      setRunStatus(run, "cancelled", { message: "Run cancelled.", phase: "finalizing" })
+      if (!run.finishReason) run.finishReason = "cancelled"
+    }
     return jsonResponse(apiSuccess({ runId: run.id, status: "cancelled" }))
   }
 
@@ -377,7 +401,10 @@ function startAgentRun(context: UiServerContext, input: RunInput) {
     id: createRunId(),
     input: sessionId ? { message, sessionId, permissionMode } : { message, permissionMode },
     status: "queued",
+    statusEvents: [],
+    activity: [],
     events: [],
+    toolCalls: new Map(),
     controller: new AbortController(),
     answer: "",
     finishReason: "",
@@ -385,17 +412,23 @@ function startAgentRun(context: UiServerContext, input: RunInput) {
     permissions: new Map(),
     done: Promise.resolve(undefined as never),
   }
-  run.done = executeRun(context, run)
   context.runs.set(run.id, run)
-  emitRunEvent(run, "run", { runId: run.id, status: run.status })
+  setRunStatus(run, "queued", { message: "Run queued.", phase: "starting" })
+  run.done = Promise.resolve().then(() => executeRun(context, run))
   return run
 }
 
 async function executeRun(context: UiServerContext, run: UiRunRecord): Promise<UiRunResult> {
   let runtime: Runtime | undefined
   try {
-    run.status = "running"
-    emitRunEvent(run, "run", { runId: run.id, status: run.status })
+    if (run.controller.signal.aborted) {
+      if (run.status !== "cancelled") {
+        setRunStatus(run, "cancelled", { message: "Run cancelled.", phase: "finalizing" })
+      }
+      if (!run.finishReason) run.finishReason = "cancelled"
+      return runResult(run)
+    }
+    setRunStatus(run, "running", { message: "Run started.", phase: "starting" })
     runtime = await buildRuntime({
       ...(context.cwd ? { cwd: context.cwd } : {}),
       permissionMode: run.input.permissionMode,
@@ -413,20 +446,37 @@ async function executeRun(context: UiServerContext, run: UiRunRecord): Promise<U
       if (event.type === "llm_text_delta") run.answer += event.text
       if (event.type === "message") run.answer = event.content
       if (event.type === "session_created") run.sessionId = event.sessionId
+      if (event.type === "tool_call") {
+        run.toolCalls.set(event.id, event)
+        emitToolIntentActivity(run, event)
+      }
+      if (event.type === "tool_result") emitToolActivity(run, event)
       if (event.type === "finish") {
-        run.finishReason = event.reason
+        if (run.status !== "cancelled") run.finishReason = event.reason
+        else if (!run.finishReason) run.finishReason = "cancelled"
         run.sessionId = event.sessionId
       }
       emitRunEvent(run, "agent_event", redactForUi(event))
     }
     if (run.controller.signal.aborted) {
-      run.status = "cancelled"
+      if (run.status !== "cancelled") {
+        setRunStatus(run, "cancelled", { message: "Run cancelled.", phase: "finalizing" })
+      }
       if (!run.finishReason) run.finishReason = "cancelled"
     } else {
-      run.status = run.finishReason === "error" ? "error" : "done"
+      setRunStatus(run, run.finishReason === "error" ? "error" : "idle", {
+        message: run.finishReason === "error" ? "Run failed." : "Run finished.",
+        phase: "finalizing",
+      })
     }
   } catch (error) {
-    run.status = run.controller.signal.aborted ? "cancelled" : "error"
+    if (run.controller.signal.aborted) {
+      if (run.status !== "cancelled") {
+        setRunStatus(run, "cancelled", { message: "Run cancelled.", phase: "finalizing" })
+      }
+    } else {
+      setRunStatus(run, "error", { message: "Run failed.", phase: "finalizing" })
+    }
     run.error = formatError(error)
     if (!run.finishReason) run.finishReason = run.status
     emitRunEvent(run, "error", { message: redactSecrets(run.error) })
@@ -443,7 +493,7 @@ async function executeRun(context: UiServerContext, run: UiRunRecord): Promise<U
 function runResult(run: UiRunRecord): UiRunResult {
   return redactForUi({
     runId: run.id,
-    status: run.status,
+    status: terminalRunStatus(run.status),
     ...(run.sessionId ? { sessionId: run.sessionId } : {}),
     answer: run.answer,
     finishReason: run.finishReason,
@@ -478,8 +528,6 @@ function checkUiPermission(
 
 function askUiPermission(run: UiRunRecord, request: PermissionRequest, decision: PermissionDecision, similarityKey: string) {
   return new Promise<PermissionDecision>((resolve) => {
-    run.status = "waiting_permission"
-    emitRunEvent(run, "run", { runId: run.id, status: run.status })
     const pending: UiPendingPermission = {
       id: createPermissionId(),
       request,
@@ -487,6 +535,24 @@ function askUiPermission(run: UiRunRecord, request: PermissionRequest, decision:
       resolve,
     }
     run.permissions.set(pending.id, pending)
+    appendActivity(run, {
+      id: stableActivityId("act_perm", run.id, pending.id, "waiting"),
+      runId: run.id,
+      ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+      kind: "permission",
+      status: "running",
+      title: "Waiting for permission",
+      summary: `Waiting for approval to run ${request.tool}`,
+      toolName: request.tool,
+      startedAt: new Date().toISOString(),
+      rawEventIds: [`permission_request:${pending.id}`],
+    })
+    setRunStatus(run, "waiting_for_permission", {
+      message: `Waiting for permission: ${request.tool}`,
+      phase: "permission",
+      permissionId: pending.id,
+      toolName: request.tool,
+    })
     emitRunEvent(run, "permission_request", {
       id: pending.id,
       runId: run.id,
@@ -521,9 +587,25 @@ function resolvePermission(context: UiServerContext, permissionId: string, input
           reason: `denied by user: ${pending.decision.reason}`,
     }
     run.permissions.delete(permissionId)
-    if (run.status === "waiting_permission") {
-      run.status = "running"
-      emitRunEvent(run, "run", { runId: run.id, status: run.status })
+    appendActivity(run, {
+      id: stableActivityId("act_perm", run.id, permissionId, decision.action),
+      runId: run.id,
+      ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+      kind: "permission",
+      status: decision.action === "allow" ? "success" : "skipped",
+      title: decision.action === "allow" ? "Permission approved" : "Permission denied",
+      summary: `${decision.action === "allow" ? "Approved" : "Denied"} ${pending.request.tool}`,
+      toolName: pending.request.tool,
+      endedAt: new Date().toISOString(),
+      rawEventIds: [`permission_result:${permissionId}`],
+    })
+    if (run.status === "waiting_for_permission") {
+      setRunStatus(run, "running", {
+        message: decision.action === "allow" ? "Permission approved. Resuming run." : "Permission denied. Resuming run.",
+        phase: "permission",
+        permissionId,
+        toolName: pending.request.tool,
+      })
     }
     pending.resolve(decision)
     emitRunEvent(run, "permission_result", { id: permissionId, action: decision.action, reason: decision.reason })
@@ -586,9 +668,104 @@ function streamRunEvents(run: UiRunRecord, signal?: AbortSignal) {
 
 function replayRunEvents(run: UiRunRecord) {
   return [
-    { event: "run", data: { runId: run.id, status: run.status } },
+    ...run.statusEvents.map((data) => ({ event: "run_status", data })),
+    { event: "run", data: legacyRunEventData(run) },
+    ...(run.activity.length
+      ? [{ event: "activity_updated", data: activityUpdatedEvent(run, run.activity.at(-1)) }]
+      : []),
     ...run.events.map((data) => ({ event: "agent_event", data })),
   ]
+}
+
+function emitToolActivity(run: UiRunRecord, event: Extract<AgentEvent, { type: "tool_result" }>) {
+  const call = run.toolCalls.get(event.id)
+  const resultActivity = activityFromToolResult({
+    runId: run.id,
+    ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+    toolCallId: event.id,
+    toolName: event.name,
+    input: call?.input,
+    ok: event.ok,
+    content: event.content,
+    metadata: event.metadata,
+    endedAt: new Date().toISOString(),
+  })
+  const existing = run.activity.find((item) => item.toolCallId === event.id)
+  appendActivity(run, existing ? updateActivityWithToolResult(existing, resultActivity, event.ok) : resultActivity)
+}
+
+function emitToolIntentActivity(run: UiRunRecord, event: Extract<AgentEvent, { type: "tool_call" }>) {
+  const item = activityFromToolIntent({
+    runId: run.id,
+    ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+    toolCallId: event.id,
+    toolName: event.name,
+    input: event.input,
+    startedAt: new Date().toISOString(),
+  })
+  if (item) appendActivity(run, item)
+}
+
+function appendActivity(run: UiRunRecord, item: ActivityItem) {
+  const index = run.activity.findIndex((activity) => activity.id === item.id)
+  const next = index >= 0
+    ? [...run.activity.slice(0, index), item, ...run.activity.slice(index + 1)]
+    : [...run.activity, item]
+  run.activity = limitActivityItems(next)
+  emitRunEvent(run, "activity_updated", activityUpdatedEvent(run, item))
+}
+
+function activityUpdatedEvent(run: UiRunRecord, item: ActivityItem | undefined): ActivityUpdatedEvent {
+  return {
+    type: "activity_updated",
+    runId: run.id,
+    ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+    activity: run.activity,
+    ...(item ? { item } : {}),
+  }
+}
+
+function setRunStatus(
+  run: UiRunRecord,
+  status: RunStatus,
+  options: {
+    phase?: RunStatusPhase
+    message?: string
+    toolCallId?: string
+    toolName?: string
+    permissionId?: string
+  } = {},
+) {
+  run.status = status
+  const event: RunStatusEvent = {
+    type: "run_status",
+    runId: run.id,
+    ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+    status,
+    ...(options.phase ? { phase: options.phase } : {}),
+    ...(options.message ? { message: options.message } : {}),
+    ...(options.toolCallId ? { toolCallId: options.toolCallId } : {}),
+    ...(options.toolName ? { toolName: options.toolName } : {}),
+    ...(options.permissionId ? { permissionId: options.permissionId } : {}),
+    updatedAt: new Date().toISOString(),
+  }
+  run.statusEvents.push(event)
+  emitRunEvent(run, "run_status", event)
+  emitRunEvent(run, "run", legacyRunEventData(run))
+}
+
+function legacyRunEventData(run: UiRunRecord) {
+  const status =
+    run.status === "waiting_for_permission"
+      ? "waiting_permission"
+      : run.status === "idle"
+        ? "done"
+        : run.status
+  return {
+    runId: run.id,
+    status,
+    runStatus: run.status,
+  }
 }
 
 function emitRunEvent(run: UiRunRecord, event: string, data: unknown) {
@@ -614,7 +791,11 @@ function closeRunSubscribers(run: UiRunRecord) {
 }
 
 function isRunTerminal(run: UiRunRecord) {
-  return run.status === "done" || run.status === "error" || run.status === "cancelled"
+  return isTerminalRunStatus(run.status)
+}
+
+function terminalRunStatus(status: RunStatus): TerminalRunStatus {
+  return isTerminalRunStatus(status) ? status : "cancelled"
 }
 
 function formatSSE(event: string, data: unknown) {
@@ -800,7 +981,7 @@ function sessionSummary(session: SessionRecord): UiSessionSummary {
   const metadata = session.metadata && typeof session.metadata === "object" && !Array.isArray(session.metadata) ? session.metadata : {}
   const workspaceDir = typeof metadata.workspaceDir === "string" ? metadata.workspaceDir : undefined
   const model = typeof metadata.model === "string" ? metadata.model : undefined
-  const finishStatus = typeof metadata.finishStatus === "string" ? metadata.finishStatus : undefined
+  const finishStatus = normalizePersistedRunStatus(metadata.finishStatus)
   return {
     id: session.id,
     cwd: session.cwd,
@@ -814,6 +995,11 @@ function sessionSummary(session: SessionRecord): UiSessionSummary {
   }
 }
 
+function sessionActivity(session: SessionRecord | undefined) {
+  const metadata = session?.metadata && typeof session.metadata === "object" && !Array.isArray(session.metadata) ? session.metadata : {}
+  return normalizePersistedActivityItems(metadata.activity)
+}
+
 async function updateUiSessionRunMetadata(runtime: Runtime, run: UiRunRecord) {
   if (!run.sessionId) return
   const session = await runtime.sessions.getSession(run.sessionId)
@@ -822,9 +1008,16 @@ async function updateUiSessionRunMetadata(runtime: Runtime, run: UiRunRecord) {
     metadata: {
       ...metadata,
       model: providerSummary(runtime.config).model,
-      finishStatus: run.status,
+      finishStatus: terminalRunStatus(run.status),
       finishReason: run.finishReason,
       lastRunId: run.id,
+      activity: limitActivityItems([
+        ...sessionActivity(session),
+        ...run.activity.map((item) => ({
+          ...item,
+          ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+        })),
+      ]),
     },
   })
 }
@@ -847,7 +1040,7 @@ async function createUiSession(runtime: RuntimeWithoutLLM, input: SessionCreateI
         sandboxMode: "workspace",
         workspaceDir: relative(runtime.cwd, sessionRoot),
         model: providerSummary(runtime.config).model,
-        finishStatus: "new",
+        finishStatus: "idle",
       },
     })
   }
@@ -859,7 +1052,7 @@ async function createUiSession(runtime: RuntimeWithoutLLM, input: SessionCreateI
       sandboxMode: runtime.config.sandbox.mode,
       workspaceDir: ".",
       model: providerSummary(runtime.config).model,
-      finishStatus: "new",
+      finishStatus: "idle",
     },
   })
 }

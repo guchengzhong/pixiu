@@ -21,6 +21,7 @@ describe("skill tool", () => {
     expect(result.content).toContain("references/guide.md")
     expect(result.content).toContain("Use demo carefully.")
     expect(result.metadata?.kind).toBe("main")
+    expect(result.metadata?.activity).toMatchObject({ kind: "skill", title: "Loaded skill", target: "demo" })
   })
 
   test("searches installed skills before loading one", async () => {
@@ -42,6 +43,7 @@ describe("skill tool", () => {
     expect(result.content).toContain("triggers=workflow, example")
     expect(result.metadata?.kind).toBe("search")
     expect(result.metadata?.skills).toEqual(["demo"])
+    expect(result.metadata?.activity).toMatchObject({ kind: "skill", title: "Searched skills", target: "workflow" })
   })
 
   test("loads a skill-relative reference file", async () => {
@@ -57,6 +59,7 @@ describe("skill tool", () => {
     expect(result.content).toBe("Guide body")
     expect(result.metadata?.kind).toBe("reference")
     expect(result.metadata?.path).toBe("references/guide.md")
+    expect(result.metadata?.activity).toMatchObject({ kind: "skill", title: "Loaded skill reference", target: "demo/references/guide.md" })
   })
 
   test("uses compact skill_search guidance when many skills are installed", async () => {

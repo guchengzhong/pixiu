@@ -30,6 +30,17 @@ export function createSkillHubTools(skillhub: PixiuConfig["skillhub"], cwd: stri
           ok: true,
           content: skills.map((skill) => `${skill.id}\t${skill.name}\t${skill.description}\t${skill.source}`).join("\n"),
           data: skills,
+          metadata: {
+            query,
+            count: skills.length,
+            activity: {
+              kind: "skill",
+              title: "Searched SkillHub",
+              summary: `Searched SkillHub for ${query}`,
+              target: query,
+              details: { count: skills.length },
+            },
+          },
         }
       },
     },
@@ -62,6 +73,13 @@ export function createSkillHubTools(skillhub: PixiuConfig["skillhub"], cwd: stri
             manifestPath: result.manifestPath,
             source: detail.source,
             files: result.files.map((file) => file.path),
+            activity: {
+              kind: "artifact",
+              title: "Installed skill",
+              summary: `Installed ${detail.name}`,
+              target: result.targetDir,
+              details: { manifestPath: result.manifestPath, fileCount: result.files.length },
+            },
           },
         }
       },

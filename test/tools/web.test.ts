@@ -57,6 +57,7 @@ describe("web tools", () => {
     expect(result.content).toContain("Agent Sandbox Paper")
     expect(result.content).toContain(`${base}/paper`)
     expect(result.metadata).toMatchObject({ kind: "web_search", query: "agent sandbox", resultCount: 1 })
+    expect(result.metadata?.activity).toMatchObject({ kind: "search", title: "Searched web", target: "agent sandbox" })
   })
 
   test("web_fetch extracts readable page text with provenance", async () => {
@@ -69,5 +70,6 @@ describe("web tools", () => {
     expect(result.content).toContain("title: Agent Sandbox Paper")
     expect(result.content).toContain("Sandbox content.")
     expect(result.metadata).toMatchObject({ kind: "web_fetch", url: `${base}/paper`, status: 200 })
+    expect(result.metadata?.activity).toMatchObject({ kind: "search", title: "Fetched page", target: `${base}/paper` })
   })
 })

@@ -27,7 +27,7 @@ async function readUntil(response: Response, pattern: string) {
   if (!reader) throw new Error("missing response body")
   const decoder = new TextDecoder()
   let text = ""
-  while (!text.includes(pattern)) {
+  while (text.indexOf(pattern) === -1 || text.indexOf("\n\n", text.indexOf(pattern)) === -1) {
     const chunk = await reader.read()
     if (chunk.done) break
     text += decoder.decode(chunk.value, { stream: true })
@@ -355,7 +355,7 @@ describe("ui server", () => {
       const listed = await json(await ui.fetch("http://127.0.0.1/api/sessions", {
         headers: { authorization: "Bearer test-token" },
       }))
-      expect(listed.data.sessions[0]).toMatchObject({ model: "fake/model", finishStatus: "done" })
+      expect(listed.data.sessions[0]).toMatchObject({ model: "fake/model", finishStatus: "idle" })
       expect(llm.calls()).toBe(1)
     } finally {
       await ui.close()
@@ -439,13 +439,99 @@ describe("ui server", () => {
       const started = await json(start)
       const stream = await ui.fetch(`http://127.0.0.1/api/runs/${started.data.runId}/events?token=test-token`)
       const events = await sse(stream)
+      const runStatuses = events
+        .filter((event) => event.event === "run_status")
+        .map((event) => event.data.status)
 
       expect(start.status).toBe(200)
+      expect(runStatuses).toEqual(["queued", "running", "idle"])
+      expect(events.some((event) => event.event === "run" && event.data.status === "done" && event.data.runStatus === "idle")).toBe(true)
       expect(events.some((event) => event.event === "agent_event" && event.data.type === "llm_text_delta")).toBe(true)
       expect(events.at(-1)).toMatchObject({
         event: "result",
-        data: expect.objectContaining({ answer: "streamed hello", status: "done" }),
+        data: expect.objectContaining({ answer: "streamed hello", status: "idle" }),
       })
+    } finally {
+      await ui.close()
+      await llm.close()
+    }
+  })
+
+  test("reports provider failures as error run status", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-run-error-"))
+    const llm = await createFakeLLMServer()
+    llm.error(500, { error: "provider exploded" })
+    await writeFile(
+      join(root, "pixiu.jsonc"),
+      JSON.stringify({
+        model: "fake/model",
+        providers: {
+          "openai-compatible": {
+            baseURL: llm.url,
+            apiKey: "sk-test",
+            model: "fake/model",
+          },
+        },
+      }),
+      "utf8",
+    )
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const response = await ui.fetch("http://127.0.0.1/api/runs?wait=1", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ message: "fail please", permissionMode: "acceptEdits" }),
+      })
+      const body = await json(response)
+
+      expect(response.status).toBe(200)
+      expect(body.data.status).toBe("error")
+      expect(body.data.finishReason).toBe("error")
+      expect(body.data.events.some((event: any) => event.type === "error")).toBe(true)
+    } finally {
+      await ui.close()
+      await llm.close()
+    }
+  })
+
+  test("cancels an active run and emits cancelled status", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-run-cancel-"))
+    const llm = await createFakeLLMServer()
+    llm.hang()
+    await writeFile(
+      join(root, "pixiu.jsonc"),
+      JSON.stringify({
+        model: "fake/model",
+        providers: {
+          "openai-compatible": {
+            baseURL: llm.url,
+            apiKey: "sk-test",
+            model: "fake/model",
+          },
+        },
+      }),
+      "utf8",
+    )
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const start = await ui.fetch("http://127.0.0.1/api/runs", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ message: "hang then cancel", permissionMode: "acceptEdits" }),
+      })
+      const started = await json(start)
+      const stream = await ui.fetch(`http://127.0.0.1/api/runs/${started.data.runId}/events?token=test-token`)
+      const partial = await readUntil(stream, '"status":"running"')
+      const cancel = await ui.fetch(`http://127.0.0.1/api/runs/${started.data.runId}/cancel`, {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: "{}",
+      })
+      const all = await partial.rest
+
+      expect(cancel.status).toBe(200)
+      expect(all).toContain('"status":"cancelled"')
+      expect(all).toContain('"finishReason":"cancelled"')
     } finally {
       await ui.close()
       await llm.close()
@@ -490,7 +576,7 @@ describe("ui server", () => {
         body: JSON.stringify({ message: "second run after disconnect", permissionMode: "acceptEdits" }),
       }))
 
-      expect(result.data.status).toBe("done")
+      expect(result.data.status).toBe("idle")
     } finally {
       await ui.close()
       await llm.close()
@@ -533,11 +619,269 @@ describe("ui server", () => {
 
       expect(response.status).toBe(200)
       expect(body.data.answer).toBe("wrote report")
+      expect(detail.data.activity).toContainEqual(expect.objectContaining({
+        kind: "file",
+        status: "success",
+        title: "Updated file",
+        target: "report.md",
+        runId: body.data.runId,
+        sessionId: body.data.sessionId,
+        toolCallId: "call_1",
+        toolName: "write",
+      }))
       expect(detail.data.evidence.artifacts).toContainEqual(expect.objectContaining({ tool: "write", path: "report.md" }))
       expect(preview.data.content).toContain("# Report")
     } finally {
       await ui.close()
       await llm.close()
+    }
+  })
+
+  test("streams semantic activity updates while preserving raw tool trace and run status", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-activity-sse-"))
+    const llm = await createFakeLLMServer()
+    llm.tool("read", { path: "note.txt" })
+    llm.text("FINAL: read note")
+    await writeFile(
+      join(root, "pixiu.jsonc"),
+      JSON.stringify({
+        model: "fake/model",
+        providers: {
+          "openai-compatible": {
+            baseURL: llm.url,
+            apiKey: "sk-test",
+            model: "fake/model",
+          },
+        },
+      }),
+      "utf8",
+    )
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const created = await json(await ui.fetch("http://127.0.0.1/api/sessions", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ title: "Read activity" }),
+      }))
+      const sessionId = created.data.session.id
+      await writeFile(join(root, created.data.session.workspaceDir, "note.txt"), "hello activity", "utf8")
+      const start = await ui.fetch("http://127.0.0.1/api/runs", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ message: "read note", sessionId, permissionMode: "acceptEdits" }),
+      })
+      const started = await json(start)
+      const stream = await ui.fetch(`http://127.0.0.1/api/runs/${started.data.runId}/events?token=test-token`)
+      const events = await sse(stream)
+      const activityEvents = events.filter((event) => event.event === "activity_updated")
+
+      expect(activityEvents).toHaveLength(1)
+      expect(activityEvents[0]?.data.item).toMatchObject({
+        kind: "file",
+        status: "success",
+        title: "Read file",
+        target: "note.txt",
+        runId: started.data.runId,
+        sessionId,
+        toolCallId: "call_1",
+        toolName: "read",
+      })
+      expect(activityEvents[0]?.data.activity).toHaveLength(1)
+      expect(events.some((event) => event.event === "agent_event" && event.data.type === "tool_call")).toBe(true)
+      expect(events.some((event) => event.event === "agent_event" && event.data.type === "tool_result")).toBe(true)
+      expect(events.filter((event) => event.event === "run_status").map((event) => event.data.status)).toEqual(["queued", "running", "idle"])
+      expect(events.some((event) => event.event === "todo_updated")).toBe(false)
+    } finally {
+      await ui.close()
+      await llm.close()
+    }
+  })
+
+  test("streams LLM intent activity for tool calls and updates the same item on result", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-activity-intent-"))
+    const llm = await createFakeLLMServer()
+    llm.tool("shell", {
+      command: "printf 'sunny 28C'",
+      _activity: {
+        kind: "search",
+        title: "Checking Wuhan weather",
+        summary: "Fetching current weather data from wttr.in",
+        target: "Wuhan",
+      },
+    })
+    llm.text("FINAL: sunny")
+    await writeFile(
+      join(root, "pixiu.jsonc"),
+      JSON.stringify({
+        model: "fake/model",
+        providers: {
+          "openai-compatible": {
+            baseURL: llm.url,
+            apiKey: "sk-test",
+            model: "fake/model",
+          },
+        },
+      }),
+      "utf8",
+    )
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const start = await ui.fetch("http://127.0.0.1/api/runs", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ message: "weather", permissionMode: "bypassPermissions" }),
+      })
+      const started = await json(start)
+      const stream = await ui.fetch(`http://127.0.0.1/api/runs/${started.data.runId}/events?token=test-token`)
+      const events = await sse(stream)
+      const activityEvents = events.filter((event) => event.event === "activity_updated")
+      const rawCall = events.find((event) => event.event === "agent_event" && event.data.type === "tool_call")
+
+      expect(activityEvents).toHaveLength(2)
+      expect(activityEvents[0]?.data.item).toMatchObject({
+        id: activityEvents[1]?.data.item.id,
+        kind: "search",
+        status: "running",
+        title: "Checking Wuhan weather",
+        source: "llm_intent",
+      })
+      expect(activityEvents[1]?.data.item).toMatchObject({
+        kind: "search",
+        status: "success",
+        title: "Checked Wuhan weather",
+        summary: "Fetching current weather data from wttr.in",
+        command: "printf 'sunny 28C'",
+        source: "llm_intent",
+      })
+      expect(activityEvents[1]?.data.activity).toHaveLength(1)
+      expect(rawCall?.data.input.command).toBe("printf 'sunny 28C'")
+      expect(rawCall?.data.input._activity.title).toBe("Checking Wuhan weather")
+      expect(events.filter((event) => event.event === "run_status").map((event) => event.data.status)).toEqual(["queued", "running", "idle"])
+      expect(events.some((event) => event.event === "todo_updated")).toBe(false)
+    } finally {
+      await ui.close()
+      await llm.close()
+    }
+  })
+
+  test("restores intent activity as terminal instead of stale running", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-activity-stale-intent-"))
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const runtime = await import("../../src/runtime/build")
+      const built = await runtime.buildRuntime({ cwd: root, loadLLM: false })
+      try {
+        await built.sessions.create({
+          id: "session_stale_activity",
+          cwd: join(root, "workspace/session_stale_activity"),
+          title: "Stale activity",
+          metadata: {
+            workspaceDir: "workspace/session_stale_activity",
+            activity: [{
+              id: "act_stale",
+              kind: "search",
+              status: "running",
+              title: "Checking Wuhan weather",
+              source: "llm_intent",
+            }],
+          },
+        })
+      } finally {
+        await built.close()
+      }
+
+      const detail = await json(await ui.fetch("http://127.0.0.1/api/sessions/session_stale_activity", {
+        headers: { authorization: "Bearer test-token" },
+      }))
+
+      expect(detail.data.activity).toEqual([expect.objectContaining({
+        id: "act_stale",
+        status: "cancelled",
+        title: "Checking Wuhan weather",
+        source: "llm_intent",
+      })])
+    } finally {
+      await ui.close()
+    }
+  })
+
+  test("falls back to conservative activity for unknown tool results", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-activity-unknown-"))
+    const llm = await createFakeLLMServer()
+    llm.tool("does_not_exist", { value: 1 })
+    llm.text("FINAL: unknown handled")
+    await writeFile(
+      join(root, "pixiu.jsonc"),
+      JSON.stringify({
+        model: "fake/model",
+        providers: {
+          "openai-compatible": {
+            baseURL: llm.url,
+            apiKey: "sk-test",
+            model: "fake/model",
+          },
+        },
+      }),
+      "utf8",
+    )
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const response = await ui.fetch("http://127.0.0.1/api/runs?wait=1", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ message: "use unknown", permissionMode: "acceptEdits" }),
+      })
+      const body = await json(response)
+      const detail = await json(await ui.fetch(`http://127.0.0.1/api/sessions/${body.data.sessionId}`, {
+        headers: { authorization: "Bearer test-token" },
+      }))
+
+      expect(detail.data.activity).toContainEqual(expect.objectContaining({
+        kind: "tool",
+        status: "error",
+        title: "Used tool: does_not_exist",
+        toolName: "does_not_exist",
+      }))
+    } finally {
+      await ui.close()
+      await llm.close()
+    }
+  })
+
+  test("restores and limits persisted semantic activity", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-activity-restore-"))
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const runtime = await import("../../src/runtime/build")
+      const built = await runtime.buildRuntime({ cwd: root, loadLLM: false })
+      try {
+        await built.sessions.create({
+          id: "session_activity",
+          cwd: join(root, "workspace/session_activity"),
+          title: "Activity",
+          metadata: {
+            workspaceDir: "workspace/session_activity",
+            activity: Array.from({ length: 105 }, (_, index) => ({
+              id: `act_${index}`,
+              kind: "tool",
+              status: "success",
+              title: `Tool ${index}`,
+            })),
+          },
+        })
+      } finally {
+        await built.close()
+      }
+
+      const detail = await json(await ui.fetch("http://127.0.0.1/api/sessions/session_activity", {
+        headers: { authorization: "Bearer test-token" },
+      }))
+
+      expect(detail.data.activity).toHaveLength(100)
+      expect(detail.data.activity[0].id).toBe("act_5")
+      expect(detail.data.activity.at(-1)).toMatchObject({ id: "act_104", title: "Tool 104" })
+    } finally {
+      await ui.close()
     }
   })
 
@@ -577,6 +921,37 @@ describe("ui server", () => {
       expect(uploaded.data.files).toContainEqual(expect.objectContaining({ path: "uploads/notes.md", kind: "text" }))
       expect(listed.data.files).toContainEqual(expect.objectContaining({ path: "uploads/notes.md" }))
       expect(preview.data.content).toBe("hello upload")
+    } finally {
+      await ui.close()
+    }
+  })
+
+  test("normalizes stale active session finish status on restore", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-stale-status-"))
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const runtime = await import("../../src/runtime/build")
+      const built = await runtime.buildRuntime({ cwd: root, loadLLM: false })
+      try {
+        await built.sessions.create({
+          id: "session_stale",
+          cwd: join(root, "workspace/session_stale"),
+          title: "Stale status",
+          metadata: { workspaceDir: "workspace/session_stale", finishStatus: "waiting_permission" },
+        })
+      } finally {
+        await built.close()
+      }
+
+      const detail = await json(await ui.fetch("http://127.0.0.1/api/sessions/session_stale", {
+        headers: { authorization: "Bearer test-token" },
+      }))
+      const listed = await json(await ui.fetch("http://127.0.0.1/api/sessions", {
+        headers: { authorization: "Bearer test-token" },
+      }))
+
+      expect(detail.data.session.finishStatus).toBe("idle")
+      expect(listed.data.sessions.find((session: any) => session.id === "session_stale").finishStatus).toBe("idle")
     } finally {
       await ui.close()
     }
@@ -674,10 +1049,10 @@ describe("ui server", () => {
       })
       const started = await json(start)
       const stream = await ui.fetch(`http://127.0.0.1/api/runs/${started.data.runId}/events?token=test-token`)
-      const partial = await readUntil(stream, "permission_request")
+      const partial = await readUntil(stream, "event: permission_request")
       const permissionId = partial.text.match(/"id":"(perm_[^"]+)"/)?.[1]
       expect(permissionId).toStartWith("perm_")
-      expect(partial.text).toContain("waiting_permission")
+      expect(partial.text).toContain("waiting_for_permission")
 
       const approval = await ui.fetch(`http://127.0.0.1/api/permissions/${permissionId}`, {
         method: "POST",
@@ -685,9 +1060,16 @@ describe("ui server", () => {
         body: JSON.stringify({ action: "allow", scope: "once" }),
       })
       const all = await partial.rest
+      const statuses = [...all.matchAll(/event: run_status\ndata: ([^\n]+)/g)].map((match) => JSON.parse(match[1]!).status)
 
       expect(approval.status).toBe(200)
+      expect(statuses).toEqual(expect.arrayContaining(["queued", "running", "waiting_for_permission", "idle"]))
+      expect(statuses.indexOf("waiting_for_permission")).toBeLessThan(statuses.lastIndexOf("running"))
       expect(all).toContain("permission_result")
+      expect(all).toContain("activity_updated")
+      expect(all).toContain("Waiting for permission")
+      expect(all).toContain("Permission approved")
+      expect(all).toContain('"status":"running"')
       expect(all).toContain("shell approved")
     } finally {
       await ui.close()
@@ -748,7 +1130,7 @@ describe("ui server", () => {
       })
       const started = await json(start)
       const stream = await ui.fetch(`http://127.0.0.1/api/runs/${started.data.runId}/events?token=test-token`)
-      const partial = await readUntil(stream, "permission_request")
+      const partial = await readUntil(stream, "event: permission_request")
       const permissionId = partial.text.match(/"id":"(perm_[^"]+)"/)?.[1]
       expect(permissionId).toStartWith("perm_")
 
@@ -761,7 +1143,7 @@ describe("ui server", () => {
 
       expect(approval.status).toBe(200)
       expect(all).toContain("shell approved")
-      expect((all.match(/permission_request/g) ?? []).length).toBe(1)
+      expect((all.match(/^event: permission_request$/gm) ?? []).length).toBe(1)
     } finally {
       await ui.close()
       await llm.close()

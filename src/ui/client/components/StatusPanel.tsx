@@ -3,6 +3,7 @@ import type { StatusSummary } from "../types"
 export function StatusPanel({ status }: { status: StatusSummary | undefined }) {
   return (
     <div className="tab-panel active">
+      <div className="trace-item"><strong>Run status</strong><pre>{status?.runStatusLabel ?? "Ready"}</pre></div>
       <div className="trace-item"><strong>Provider key</strong><pre>{status?.providerKeyPresent ? "ready" : "missing"}</pre></div>
       <div className="trace-item"><strong>Project</strong><pre>{status?.cwd ?? "loading"}</pre></div>
       <div className="trace-item"><strong>Workspace</strong><pre>{status?.workspace ?? "loading"}</pre></div>

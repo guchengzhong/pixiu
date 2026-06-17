@@ -53,6 +53,14 @@ export function createWebTools(options: { searchBaseURL?: string } = {}): ToolDe
             bytes: text.bytes,
             truncated: text.truncated,
             ...(title ? { title } : {}),
+            activity: {
+              kind: "search",
+              title: response.ok ? "Fetched page" : "Page fetch failed",
+              summary: `Fetched ${title ?? url}`,
+              target: url,
+              status: response.ok ? "success" : "error",
+              details: { status: response.status },
+            },
           },
         }
       },
@@ -96,6 +104,14 @@ export function createWebTools(options: { searchBaseURL?: string } = {}): ToolDe
             accessedAt,
             resultCount: results.length,
             status: response.status,
+            activity: {
+              kind: "search",
+              title: response.ok ? "Searched web" : "Web search failed",
+              summary: `Searched ${query}`,
+              target: query,
+              status: response.ok ? "success" : "error",
+              details: { resultCount: results.length, status: response.status },
+            },
           },
         }
       },

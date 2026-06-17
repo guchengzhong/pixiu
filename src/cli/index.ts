@@ -462,12 +462,24 @@ async function chatCommand(args: string[]): Promise<CliResult> {
   let interruptArmed = false
   let exitRequested = false
   let activeController: AbortController | undefined
+  let runCancelRequested = false
   const chatStartedAt = Date.now()
   let lastStats: ChatStats | undefined
   const onRunSigint = () => {
     if (activeController) {
+      if (runCancelRequested) {
+        process.stdout.write("\n")
+        exitRequested = true
+        activeController.abort()
+        input.interrupt()
+        input.close()
+        return
+      }
+      runCancelRequested = true
+      interruptArmed = true
       activeController.abort()
       process.stdout.write("\nCancelled current run.\n")
+      process.stdout.write("Press Ctrl-C again to exit.\n")
       return
     }
     if (interruptArmed) {
@@ -509,7 +521,7 @@ async function chatCommand(args: string[]): Promise<CliResult> {
         continue
       }
       if (command === "/clear") {
-        if (process.stdout.isTTY) await redrawBanner("Visible transcript hidden. Session history and context were kept.", { clearScrollback: false })
+        if (process.stdout.isTTY) await redrawBanner("Screen cleared. Session history and context were kept.")
         else process.stdout.write("\n")
         continue
       }
@@ -577,6 +589,7 @@ async function chatCommand(args: string[]): Promise<CliResult> {
       activeStatus = status
       const trace = new CliTraceRenderer({ write: (chunk) => process.stdout.write(chunk), noColor, verbose, terminal, style: "codebuddy" })
       activeController = new AbortController()
+      runCancelRequested = false
       try {
         for await (const event of runtime.runner.run(
           activeSessionId
@@ -603,10 +616,12 @@ async function chatCommand(args: string[]): Promise<CliResult> {
         }
       } finally {
         activeController = undefined
+        runCancelRequested = false
         if (activeStatus === status) activeStatus = undefined
         status.finish()
       }
       trace.finish()
+      if (exitRequested) break
     }
   } finally {
     process.off("SIGINT", onRunSigint)
@@ -1051,7 +1066,7 @@ function clearTerminalForChat(options: { clearScrollback?: boolean } = {}) {
   process.stdout.write(clearTerminalSequence(options))
 }
 
-function clearTerminalSequence(options: { clearScrollback?: boolean } = {}) {
+export function clearTerminalSequence(options: { clearScrollback?: boolean } = {}) {
   return `\x1b[H\x1b[2J${options.clearScrollback === false ? "" : "\x1b[3J"}\x1b[H`
 }
 

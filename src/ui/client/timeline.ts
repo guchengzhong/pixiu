@@ -473,7 +473,7 @@ function permissionDescription(value: unknown, failed: boolean): { title: string
 function runFinishedSubtitle(detail: string | undefined) {
   const status = detail?.match(/status:\s*([^\n]+)/)?.[1]?.trim()
   const finishReason = detail?.match(/finishReason:\s*([^\n]+)/)?.[1]?.trim()
-  if (status === "done" && finishReason === "stop") return "Finished normally"
+  if ((status === "done" || status === "idle") && finishReason === "stop") return "Finished normally"
   if (status || finishReason) return [status ? `status ${status}` : undefined, finishReason ? `finish ${finishReason}` : undefined].filter(Boolean).join(" · ")
   return undefined
 }

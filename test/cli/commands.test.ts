@@ -17,7 +17,7 @@ describe("chat slash commands", () => {
     expect(names).toContain("config")
     expect(names).toContain("doctor")
     expect(help).toContain("/clear")
-    expect(help).toContain("Hide the visible transcript")
+    expect(help).toContain("Clear the terminal screen")
     expect(help).toContain("/config")
   })
 

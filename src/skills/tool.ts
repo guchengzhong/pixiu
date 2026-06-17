@@ -39,6 +39,13 @@ export function createSkillTools(loader: SkillLoader): ToolDefinition[] { // ret
             count: skills.length,
             skills: skills.map((skill) => skill.name),
             kind: "search",
+            activity: {
+              kind: "skill",
+              title: "Searched skills",
+              summary: `Searched skills for ${query}`,
+              target: query,
+              details: { count: skills.length },
+            },
           },
         }
       },
@@ -78,6 +85,12 @@ export function createSkillTools(loader: SkillLoader): ToolDefinition[] { // ret
               path,
               source: skill.source,
               kind: "reference",
+              activity: {
+                kind: "skill",
+                title: "Loaded skill reference",
+                summary: `Loaded ${skill.name}/${path}`,
+                target: `${skill.name}/${path}`,
+              },
             },
           }
         }
@@ -95,6 +108,12 @@ export function createSkillTools(loader: SkillLoader): ToolDefinition[] { // ret
             files: skill.files.map((file) => file.path),
             duplicates: skill.duplicates?.map((item) => item.skillPath) ?? [],
             kind: "main",
+            activity: {
+              kind: "skill",
+              title: "Loaded skill",
+              summary: `Loaded ${skill.name}`,
+              target: skill.name,
+            },
           },
         }
       },
