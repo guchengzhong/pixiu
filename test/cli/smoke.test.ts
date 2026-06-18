@@ -22,6 +22,7 @@ describe("pixiu CLI smoke subprocesses", () => {
       expectExit(managedTools, 0, "tools env status")
       expect(managedTools.stdout).toContain("Managed tool environment")
       expect(managedTools.stdout).toContain("agent-reach")
+      expect(managedTools.stdout).toContain("browser-use")
 
       const managedPath = await exec(["tools", "env", "path"])
       expectExit(managedPath, 0, "tools env path")
@@ -31,6 +32,15 @@ describe("pixiu CLI smoke subprocesses", () => {
       expectExit(agentReachPreview, 0, "tools install agent-reach preview")
       expect(agentReachPreview.stdout).toContain("Managed tool install preview")
       expect(agentReachPreview.stdout).toContain("agent-reach")
+
+      const browserUsePreview = await exec(["tools", "install", "browser-use"])
+      expectExit(browserUsePreview, 0, "tools install browser-use preview")
+      expect(browserUsePreview.stdout).toContain("Managed tool install preview")
+      expect(browserUsePreview.stdout).toContain("browser-use")
+      expect(browserUsePreview.stdout).toContain("browser-use[core]")
+      expect(browserUsePreview.stdout).toContain("httpx[socks]")
+      expect(browserUsePreview.stdout).toContain("SOCKS proxy")
+      expect(browserUsePreview.stdout).toContain("does not enable browser-use cloud mode")
 
       const sessions = await exec(["session", "list"])
       expectExit(sessions, 0, "session list")

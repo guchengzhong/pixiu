@@ -59,7 +59,21 @@ describe("default agent prompt", () => {
     expect(prompt).toContain("Pixiu's managed tool environment")
     expect(prompt).toContain("pixiu tools env status")
     expect(prompt).toContain("pixiu tools install agent-reach")
+    expect(prompt).toContain("pixiu tools install browser-use")
+    expect(prompt).toContain("Do not invent unsupported install commands")
+    expect(prompt).toContain("user has asked or approved")
     expect(prompt).toContain("global pip")
+  })
+
+  test("prioritizes triggered local skills before generic live-data routes", () => {
+    const prompt = defaultConfig.agents.default.systemPrompt ?? ""
+
+    expect(prompt).toContain("first check whether an installed local Skill has matching triggers")
+    expect(prompt).toContain("load that Skill before using generic web_search, web_fetch, shell, temporary scripts, or direct APIs")
+    expect(prompt).toContain("For platform-specific tasks such as XiaoHongShu/小红书/xhs")
+    expect(prompt).toContain("this is Agent Reach first, then Skill(browser-use)")
+    expect(prompt).toContain("blocked by login, QR scan, captcha, 2FA, cookie/session, browser authorization")
+    expect(prompt).toContain("call the skill tool before other task tools")
   })
 
   test("treats loaded skill guardrails as execution constraints", () => {
@@ -70,6 +84,9 @@ describe("default agent prompt", () => {
     expect(prompt).toContain("install")
     expect(prompt).toContain("credential")
     expect(prompt).toContain("do not route around them")
+    expect(prompt).toContain("browser-use headed browser startup failure")
+    expect(prompt).toContain("stay on that Skill's documented recovery path")
+    expect(prompt).toContain("do not pivot to generic web readers, curl, direct APIs, third-party aggregators, or headless browser workarounds")
   })
 
   test("agent completion protocol documents shell purpose and activity examples", async () => {

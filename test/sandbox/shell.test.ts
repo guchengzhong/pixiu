@@ -19,6 +19,7 @@ describe("shell sandbox helpers", () => {
 
     expect(findOutsideWorkspaceShellWrite("printf nope > ../outside.txt", root)).toBe("../outside.txt")
     expect(findOutsideWorkspaceShellWrite("printf ok > .pixiu/tmp/a.txt", root)).toBeUndefined()
+    expect(findOutsideWorkspaceShellWrite("browser-use close >/dev/null 2>&1", root)).toBeUndefined()
   })
 
   test("prepends managed environment bin path for shell commands", async () => {
@@ -53,5 +54,25 @@ describe("shell sandbox helpers", () => {
 
     expect(result.exitCode).toBe(0)
     expect(result.stdout).toBe("1")
+  })
+
+  test("passes allowed desktop session variables to shell commands", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-shell-display-"))
+    const previous = process.env.DISPLAY
+    process.env.DISPLAY = ":42"
+    try {
+      const result = await runShell("printf \"$DISPLAY\"", {
+        cwd: root,
+        timeoutMs: 500,
+        outputMaxBytes: 4_000,
+        envAllowlist: ["PATH", "DISPLAY"],
+      })
+
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toBe(":42")
+    } finally {
+      if (previous === undefined) delete process.env.DISPLAY
+      else process.env.DISPLAY = previous
+    }
   })
 })

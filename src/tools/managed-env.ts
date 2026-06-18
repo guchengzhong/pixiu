@@ -31,6 +31,8 @@ export type ManagedEnvRunResult = {
   stderr: string
 }
 
+export const BROWSER_USE_PACKAGE_REFS = ["browser-use[core]", "httpx[socks]"] as const
+
 export function resolveManagedEnv(config: PixiuConfig, options: { cwd?: string } = {}) {
   const env = config.tools.managedEnv
   const envPath = env.path ? expandHome(env.path) : defaultEnvPath(env)
@@ -45,7 +47,7 @@ export function resolveManagedEnv(config: PixiuConfig, options: { cwd?: string }
 
 export async function inspectManagedEnv(config: PixiuConfig, options: { cwd?: string; tools?: string[] } = {}): Promise<ManagedEnvStatus> {
   const resolved = resolveManagedEnv(config, options)
-  const tools = options.tools ?? ["agent-reach"]
+  const tools = options.tools ?? ["agent-reach", "browser-use"]
   const exists = await pathExists(resolved.envPath)
   const managerAvailable = Boolean(resolved.managerCommand)
   const binPath = resolved.binPath
@@ -126,6 +128,10 @@ export async function installAgentReach(config: PixiuConfig, options: { cwd?: st
     cwd: options.cwd ?? process.cwd(),
     env: managedPythonEnv(config),
   })
+}
+
+export async function installBrowserUse(config: PixiuConfig, options: { cwd?: string } = {}): Promise<ManagedEnvRunResult> {
+  return installPythonPackage(config, [...BROWSER_USE_PACKAGE_REFS], options)
 }
 
 export async function findAgentReachSource(cwd: string) {
@@ -209,6 +215,33 @@ async function isAgentReachSource(path: string) {
   if (!(await pathExists(join(path, "pyproject.toml")))) return false
   if (!(await pathExists(join(path, "agent_reach")))) return false
   return true
+}
+
+async function installPythonPackage(config: PixiuConfig, packageRef: string | string[], options: { cwd?: string } = {}): Promise<ManagedEnvRunResult> {
+  const resolved = resolveManagedEnv(config, options)
+  const packageRefs = Array.isArray(packageRef) ? packageRef : [packageRef]
+  if (!resolved.config.enabled) return { exitCode: 1, stdout: "", stderr: "Managed tool environment is disabled." }
+  if (!(await pathExists(resolved.envPath))) {
+    const created = await createManagedEnv(config, options)
+    if (created.exitCode !== 0) return created
+  }
+  if (resolved.config.manager === "venv") {
+    const python = join(resolved.binPath, process.platform === "win32" ? "python.exe" : "python")
+    return runCommand(python, ["-m", "pip", "install", ...packageRefs], {
+      cwd: options.cwd ?? process.cwd(),
+      env: managedPythonEnv(config),
+    })
+  }
+  if (!resolved.managerCommand) {
+    return { exitCode: 127, stdout: "", stderr: `${resolved.config.manager} not found in PATH.` }
+  }
+  const targetArgs = shouldUseEnvPath(resolved.config)
+    ? ["run", "-p", resolved.envPath]
+    : ["run", "-n", resolved.config.name]
+  return runCommand(resolved.managerCommand, [...targetArgs, "python", "-m", "pip", "install", ...packageRefs], {
+    cwd: options.cwd ?? process.cwd(),
+    env: managedPythonEnv(config),
+  })
 }
 
 async function pathExists(path: string) {

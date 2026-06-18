@@ -72,7 +72,9 @@ export function findOutsideWorkspaceShellWrite(command: string, workspaceRoot: s
   const targets = [...redirectionTargets(command), ...writeCommandTargets(command)]
   return targets.find((target) => {
     if (!target || target.startsWith("&")) return false
-    const absolute = resolve(workspaceRoot, stripQuotes(target))
+    const stripped = stripQuotes(target)
+    if (stripped === "/dev/null") return false
+    const absolute = resolve(workspaceRoot, stripped)
     return !isInside(workspaceRoot, absolute)
   })
 }

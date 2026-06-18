@@ -1,6 +1,6 @@
 # Managed Tools
 
-Pixiu uses a managed tool environment for optional external CLIs such as Agent Reach.
+Pixiu uses a managed tool environment for optional external CLIs such as Agent Reach and browser-use.
 This keeps project tasks from mutating system Python or relying on `conda activate` in every shell call.
 
 ## Source vs Installed CLI
@@ -70,6 +70,41 @@ agent-reach doctor --json
 ```
 
 without `conda activate`.
+
+## Browser Use
+
+Install or preview the upstream browser-use CLI:
+
+```bash
+pixiu tools install browser-use
+pixiu tools install browser-use --yes
+```
+
+Pixiu installs only the upstream browser-use package into the managed environment:
+
+```text
+browser-use[core]
+httpx[socks]
+```
+
+`httpx[socks]` is included because browser-use can fail at startup when the user shell has SOCKS proxy variables but the managed env lacks socks support.
+
+This does not make browser-use a Pixiu core dependency, and it does not enable browser-use cloud mode, browser profiles, cookies, saved sessions, login automation, or captcha solving. Those remain explicit user-controlled actions.
+
+After installation, future Pixiu shell calls can run:
+
+```bash
+browser-use doctor
+```
+
+without `conda activate`.
+
+When the user explicitly chooses a visible browser route, the Skill adapter should use a headed session, pause for user-controlled login or verification, then resume against the same session:
+
+```bash
+browser-use --headed --session pixiu-xiaohongshu open https://www.xiaohongshu.com
+browser-use --session pixiu-xiaohongshu state
+```
 
 ## Automation Boundary
 

@@ -73,6 +73,8 @@ Use this Skill when the task needs Agent Reach's platform channels or multi-back
 
 For more Pixiu-specific routing detail, load `references/pixiu-routing.md`.
 
+Browser-use handoff: if a XiaoHongShu Agent Reach backend is blocked by login, QR scan, captcha, 2FA, cookie/session, browser authorization, or the user explicitly chooses browser-use/the browser route, stop Agent Reach backend probing and load `Skill(browser-use)`. Choose a fresh task-specific browser-use session name such as `pixiu-xiaohongshu-tech`; then run `browser-use doctor`, `browser-use --headed --session <session-name> open https://www.xiaohongshu.com`, and `browser-use --session <session-name> state`. A successful `browser-use doctor` is only an availability check; continue to the headed `open` command before reporting browser-use as attempted. Do not keep trying Jina, public/private APIs, third-party aggregators, temporary MCP installs, or scraping scripts after the route is blocked or browser-use is selected.
+
 ## First Check
 
 Before platform-specific work, check whether Agent Reach is available:
@@ -105,12 +107,13 @@ Do not install all optional Agent Reach channels by default. Install only the ch
 Stop the current execution route and call `request_user_action` before trying workaround commands when any of these happen:
 
 - `agent-reach` is missing and the user has not already asked Pixiu to install it. If the user has asked or approved installation, install it through `pixiu tools install agent-reach --yes`.
+- The user explicitly chose browser-use, the browser route, or a visible browser for the blocked platform task. Load `Skill(browser-use)` instead of continuing Agent Reach backends.
 - The required platform channel is missing and installation would add external packages, browser tooling, MCP services, or persistent config.
 - A backend reports missing login, cookie/session, QR scan, captcha, 2FA, browser authorization, API key, account permission, or proxy setup.
 - A login command starts downloading browser automation tooling, hangs while waiting for a QR scan, or asks for interactive user input.
 - Anonymous access is blocked by the platform.
 
-Do not bypass platform authentication with ad hoc private endpoints, scraping scripts, Playwright/Camoufox experiments, third-party aggregator scraping, or repeated blind retries. If the user explicitly chooses a non-Agent-Reach fallback, keep it read-only, explain the reliability limits, and do not handle credentials outside the configured Agent Reach path.
+Do not bypass platform authentication with ad hoc private endpoints, scraping scripts, Playwright/Camoufox experiments, third-party aggregator scraping, temporary package/MCP installs, or repeated blind retries. If the user explicitly chooses a non-Agent-Reach fallback, keep it read-only, explain the reliability limits, and do not handle credentials outside the configured Agent Reach path.
 
 Example request for XiaoHongShu login:
 
@@ -121,10 +124,11 @@ Example request for XiaoHongShu login:
   "category": "auth",
   "instructions": [
     "桌面环境：在浏览器登录小红书，并启用 OpenCLI/Agent Reach 推荐的浏览器通道。",
-    "服务器环境：使用 Agent Reach 推荐的 xiaohongshu-mcp 二维码登录，或用 Cookie-Editor 导出专用小号 Cookie 后通过 agent-reach configure 导入。",
-    "完成后回复我继续，我会重新运行 agent-reach doctor --json 并使用可用后端。"
+    "服务器环境：如果 xiaohongshu-mcp 已经配置，可在该服务的二维码登录界面完成扫码；不要在任务中临时安装或配置 MCP。",
+    "如果你选择 browser-use/浏览器方案，我会加载 Skill(browser-use)，用一个新的任务专用 browser-use session 以 --headed 打开官方页面；遇到登录、扫码、验证码或 Cookie/session 要求时会停下来让你在浏览器里接管。",
+    "完成后保持浏览器窗口打开并回复我继续，我会重新运行 agent-reach doctor --json 或 browser-use --session <session-name> state 并使用可用路线。"
   ],
-  "resumeHint": "完成登录或 Cookie 导入后回复“继续”。"
+  "resumeHint": "完成登录、Cookie 导入或浏览器授权后回复“继续”。"
 }
 ```
 

@@ -34,6 +34,11 @@ export type AgentRunnerOptions = {
       stdout: string
       stderr: string
     }>
+    installBrowserUse?: (input: { cwd: string; signal?: AbortSignal }) => Promise<{
+      exitCode: number | null
+      stdout: string
+      stderr: string
+    }>
   }
 }
 
@@ -218,15 +223,25 @@ export class AgentRunner {
       }
 
       if (!assistantText.trim()) {
-        const message = "LLM returned an empty response without tool calls."
-        await this.options.sessions.appendMessage({
-          sessionId: session.id,
-          role: "assistant",
-          parts: [{ type: "error", message, code: "EMPTY_LLM_RESPONSE" }],
+        if (draftContinuations >= 1) {
+          const message = "LLM returned an empty response without tool calls."
+          await this.options.sessions.appendMessage({
+            sessionId: session.id,
+            role: "assistant",
+            parts: [{ type: "error", message, code: "EMPTY_LLM_RESPONSE" }],
+          })
+          yield { type: "error", message }
+          yield { type: "finish", reason: "error", sessionId: session.id }
+          return
+        }
+
+        draftContinuations += 1
+        continuationMessages.push({
+          role: "user",
+          content:
+            "Continue the task. Your previous response was empty and did not call a tool. If work remains, call the appropriate tool now. If you just checked browser-use successfully for a visible browser fallback, continue by loading Skill(browser-use) if needed and opening the headed browser with a fresh task-specific session. If the task is already fully answered, reply with FINAL: followed by the answer.",
         })
-        yield { type: "error", message }
-        yield { type: "finish", reason: "error", sessionId: session.id }
-        return
+        continue
       }
 
       if (draftContinuations >= 1) {
@@ -282,24 +297,25 @@ export class AgentRunner {
   ): Promise<AgentEvent[]> {
     const blocker = state.blockers.find(
       (item): item is Extract<SkillRouteBlocker, { kind: "missing_managed_tool" }> =>
-        item.kind === "missing_managed_tool" && item.skill === "agent-reach" && item.tool === "agent-reach",
+        item.kind === "missing_managed_tool" && Boolean(managedToolDefinition(item.tool, item.skill)),
     )
     if (!blocker || blocker.autoInstallAttempted) return []
     if (this.options.managedTools?.autoInstall !== "allow") return []
-    const installAgentReach = this.options.managedTools.installAgentReach
-    if (!installAgentReach) return []
+    const definition = managedToolDefinition(blocker.tool, blocker.skill)
+    const installer = definition ? this.managedToolInstaller(definition.tool) : undefined
+    if (!definition || !installer) return []
 
     blocker.autoInstallAttempted = true
     const baseToolContext = this.options.toolContextForSession?.(session) ?? this.options.toolContext
     const id = createID("call")
     const input = {
-      command: "pixiu tools install agent-reach --yes",
-      purpose: "安装 Agent Reach 到 Pixiu 托管工具环境",
+      command: definition.installCommand,
+      purpose: definition.installPurpose,
       _activity: {
         kind: "shell",
-        title: "安装 Agent Reach",
-        summary: "Installing Agent Reach into the Pixiu managed tool environment.",
-        target: "agent-reach",
+        title: definition.installActivityTitle,
+        summary: definition.installActivitySummary,
+        target: definition.tool,
       },
     } satisfies JsonObject
     await this.options.sessions.appendMessage({
@@ -308,7 +324,7 @@ export class AgentRunner {
       parts: [{ type: "tool_call", id, name: "shell", input: stripToolActivityInput(input) }],
     })
 
-    const install = await installAgentReach({ cwd: baseToolContext.cwd, ...(signal ? { signal } : {}) })
+    const install = await installer({ cwd: baseToolContext.cwd, ...(signal ? { signal } : {}) })
     const content = [install.stdout.trim(), install.stderr.trim()].filter(Boolean).join("\n") || `exitCode: ${install.exitCode ?? -1}`
     const ok = install.exitCode === 0
     const result = {
@@ -317,21 +333,19 @@ export class AgentRunner {
       metadata: {
         command: input.command,
         exitCode: install.exitCode ?? -1,
-        managedTool: "agent-reach",
+        managedTool: definition.tool,
         managedToolAutoInstall: true,
         blocker,
         activity: {
           kind: "shell",
-          title: ok ? "Installed Agent Reach" : "Agent Reach install failed",
-          summary: ok
-            ? "Installed Agent Reach into the Pixiu managed tool environment."
-            : "Could not install Agent Reach into the Pixiu managed tool environment.",
+          title: ok ? definition.installedActivityTitle : definition.installFailedActivityTitle,
+          summary: ok ? definition.installedActivitySummary : definition.installFailedActivitySummary,
           command: input.command,
-          target: "agent-reach",
+          target: definition.tool,
           status: ok ? "success" : "error",
           details: {
             exitCode: install.exitCode ?? -1,
-            managedTool: "agent-reach",
+            managedTool: definition.tool,
             autoInstall: true,
           },
         },
@@ -353,12 +367,98 @@ export class AgentRunner {
       { type: "tool_result", id, name: "shell", ok: result.ok, content: result.content, metadata: result.metadata },
     ]
   }
+
+  private managedToolInstaller(tool: ManagedToolName) {
+    if (tool === "agent-reach") return this.options.managedTools?.installAgentReach
+    if (tool === "browser-use") return this.options.managedTools?.installBrowserUse
+    return undefined
+  }
 }
 
 type SkillRouteState = {
   loadedSkills: Set<string>
   blockers: SkillRouteBlocker[]
 }
+
+type ManagedToolName = "agent-reach" | "browser-use"
+
+type ManagedToolDefinition = {
+  skill: string
+  tool: ManagedToolName
+  commandPattern: RegExp
+  notFoundPattern: RegExp
+  installAllowedPattern: RegExp
+  installCommand: string
+  installPurpose: string
+  installActivityTitle: string
+  installActivitySummary: string
+  installedActivityTitle: string
+  installedActivitySummary: string
+  installFailedActivityTitle: string
+  installFailedActivitySummary: string
+  missingContent: string[]
+  missingTitle: string
+  missingReason: string
+  missingInstructions: string[]
+  missingSummary: string
+}
+
+const MANAGED_TOOL_DEFINITIONS: ManagedToolDefinition[] = [
+  {
+    skill: "agent-reach",
+    tool: "agent-reach",
+    commandPattern: /(^|[\s;&|()])agent-reach(\s|$)|\bcommand\s+-v\s+agent-reach\b/,
+    notFoundPattern: /(?:agent-reach|command): not found|not recognized/i,
+    installAllowedPattern: /^\s*pixiu\s+tools\s+install\s+agent-reach\s+--yes\s*$/,
+    installCommand: "pixiu tools install agent-reach --yes",
+    installPurpose: "安装 Agent Reach 到 Pixiu 托管工具环境",
+    installActivityTitle: "安装 Agent Reach",
+    installActivitySummary: "Installing Agent Reach into the Pixiu managed tool environment.",
+    installedActivityTitle: "Installed Agent Reach",
+    installedActivitySummary: "Installed Agent Reach into the Pixiu managed tool environment.",
+    installFailedActivityTitle: "Agent Reach install failed",
+    installFailedActivitySummary: "Could not install Agent Reach into the Pixiu managed tool environment.",
+    missingContent: [
+      "Agent Reach is missing from the active tool environment.",
+      "Use `request_user_action` to ask for installation approval, or run `pixiu tools install agent-reach --yes` to install it into Pixiu's managed tool environment.",
+      "Do not continue with ad hoc scraping, private endpoint probing, browser automation experiments, or unrelated fallback commands while this blocker is active.",
+    ],
+    missingTitle: "需要安装 Agent Reach",
+    missingReason: "Agent Reach 当前未安装到 Pixiu managed tool environment。",
+    missingInstructions: [
+      "允许 Pixiu 安装 Agent Reach 到 managed tool environment，或手动运行 `pixiu tools install agent-reach --yes`。",
+      "安装完成后回复继续，Pixiu 会重新运行 `agent-reach doctor --json`。",
+    ],
+    missingSummary: "Agent Reach 缺失，等待安装授权或 managed env 安装。",
+  },
+  {
+    skill: "browser-use",
+    tool: "browser-use",
+    commandPattern: /(^|[\s;&|()])browser-use(\s|$)|\bcommand\s+-v\s+browser-use\b/,
+    notFoundPattern: /(?:browser-use|command): not found|not recognized/i,
+    installAllowedPattern: /^\s*pixiu\s+tools\s+install\s+browser-use\s+--yes\s*$/,
+    installCommand: "pixiu tools install browser-use --yes",
+    installPurpose: "安装 browser-use 到 Pixiu 托管工具环境",
+    installActivityTitle: "安装 browser-use",
+    installActivitySummary: "Installing browser-use into the Pixiu managed tool environment.",
+    installedActivityTitle: "Installed browser-use",
+    installedActivitySummary: "Installed browser-use into the Pixiu managed tool environment.",
+    installFailedActivityTitle: "browser-use install failed",
+    installFailedActivitySummary: "Could not install browser-use into the Pixiu managed tool environment.",
+    missingContent: [
+      "browser-use is missing from the active tool environment.",
+      "Use `request_user_action` to ask for installation approval, or run `pixiu tools install browser-use --yes` to install it into Pixiu's managed tool environment.",
+      "Do not continue with ad hoc scraping, private endpoint probing, third-party aggregators, or unrelated fallback commands while this browser route blocker is active.",
+    ],
+    missingTitle: "需要安装 browser-use",
+    missingReason: "browser-use 当前未安装到 Pixiu managed tool environment。",
+    missingInstructions: [
+      "允许 Pixiu 安装 browser-use 到 managed tool environment，或手动运行 `pixiu tools install browser-use --yes`。",
+      "安装完成后回复继续，Pixiu 会重新运行 `browser-use doctor` 或 `browser-use --help`。",
+    ],
+    missingSummary: "browser-use 缺失，等待安装授权或 managed env 安装。",
+  },
+]
 
 type SkillRouteBlocker =
   | {
@@ -387,10 +487,16 @@ function createSkillRouteState(): SkillRouteState {
 }
 
 function skillRouteGuardResult(state: SkillRouteState, toolName: string, input: JsonObject) {
-  const blocker = activeSkillRouteBlocker(state)
-  if (!blocker) return undefined
   if (toolName === "request_user_action") return undefined
-  if (blocker.kind === "missing_managed_tool" && isAllowedAgentReachManagedInstall(toolName, input)) return undefined
+  const blocker = activeSkillRouteBlocker(state)
+  if (blocker?.kind === "missing_managed_tool") {
+    if (isAllowedManagedToolInstall(toolName, input, blocker)) return undefined
+    return missingManagedToolBlockedResult(blocker)
+  }
+  const browserUseRouteBlock = browserUseRouteGuardResult(state, toolName, input)
+  if (browserUseRouteBlock) return browserUseRouteBlock
+  if (!blocker) return undefined
+  if (isAllowedBrowserUseHandoff(toolName, input, blocker)) return undefined
   if (blocker.kind === "user_action_required") {
     return {
       ok: false,
@@ -415,49 +521,110 @@ function skillRouteGuardResult(state: SkillRouteState, toolName: string, input: 
           status: "skipped",
           details: {
             blocker,
-            allowedNext: ["request_user_action"],
+            allowedNext: allowedNextForUserActionBlocker(blocker),
           },
         },
       },
     }
   }
+  return undefined
+}
+
+function missingManagedToolBlockedResult(blocker: Extract<SkillRouteBlocker, { kind: "missing_managed_tool" }>) {
+  const definition = managedToolDefinition(blocker.tool, blocker.skill)
   return {
     ok: false,
-    content: [
-      "Agent Reach is missing from the active tool environment.",
-      "Use `request_user_action` to ask for installation approval, or run `pixiu tools install agent-reach --yes` to install it into Pixiu's managed tool environment.",
-      "Do not continue with ad hoc scraping, private endpoint probing, browser automation experiments, or unrelated fallback commands while this blocker is active.",
-    ].join("\n"),
+    content: (definition?.missingContent ?? ["A required managed tool is missing from the active tool environment."]).join("\n"),
     metadata: {
       skillRouteBlocked: true,
       blocker,
       userActionRequired: true,
       category: "environment",
-      title: "需要安装 Agent Reach",
-      reason: "Agent Reach 当前未安装到 Pixiu managed tool environment。",
-      instructions: [
-        "允许 Pixiu 安装 Agent Reach 到 managed tool environment，或手动运行 `pixiu tools install agent-reach --yes`。",
-        "安装完成后回复继续，Pixiu 会重新运行 `agent-reach doctor --json`。",
-      ],
+      title: definition?.missingTitle ?? "需要安装 managed tool",
+      reason: definition?.missingReason ?? `${blocker.tool} 当前未安装到 Pixiu managed tool environment。`,
+      instructions: definition?.missingInstructions ?? [`安装 ${blocker.tool} 后回复“继续”。`],
       resumeHint: "完成安装后回复“继续”。",
       activity: {
         kind: "permission",
-        title: "需要安装 Agent Reach",
-        summary: "Agent Reach 缺失，等待安装授权或 managed env 安装。",
+        title: definition?.missingTitle ?? "需要安装 managed tool",
+        summary: definition?.missingSummary ?? `${blocker.tool} 缺失，等待安装授权或 managed env 安装。`,
         status: "skipped",
         details: {
           blocker,
-          allowedNext: ["request_user_action", "pixiu tools install agent-reach --yes"],
+          allowedNext: ["request_user_action", ...(definition ? [definition.installCommand] : [])],
         },
       },
     },
   }
 }
 
+function browserUseRouteGuardResult(state: SkillRouteState, toolName: string, input: JsonObject) {
+  if (!state.loadedSkills.has("browser-use")) return undefined
+  if (toolName === "skill" && stringJsonValue(input.name) === "browser-use") return undefined
+  if (toolName === "shell") {
+    const command = stringJsonValue(input.command)
+    if (command && isAllowedBrowserUseRouteCommand(command)) return undefined
+    return browserUseRouteBlockedResult(command)
+  }
+  if (toolName === "web_search" || toolName === "web_fetch") return browserUseRouteBlockedResult(toolName)
+  return undefined
+}
+
+function isAllowedBrowserUseRouteCommand(command: string) {
+  const browserUse = managedToolDefinition("browser-use", "browser-use")
+  return Boolean(
+    browserUse &&
+      (isManagedToolCommand(command, browserUse) ||
+        isBrowserUseRouteDiagnosticCommand(command) ||
+        browserUse.installAllowedPattern.test(command) ||
+        /^\s*pixiu\s+tools\s+install\s+browser-use(?:\s+--yes)?\s*$/.test(command) ||
+        /^\s*pixiu\s+tools\s+env\s+status\s*$/.test(command)),
+  )
+}
+
+function isBrowserUseRouteDiagnosticCommand(command: string) {
+  const normalized = command.trim()
+  return /^(?:env|printenv)(?:\s|$)/.test(normalized) ||
+    /^(?:echo|printf)\s+/.test(normalized) ||
+    /^(?:which|type)\s+browser-use\s*$/.test(normalized) ||
+    /^command\s+-v\s+browser-use\s*$/.test(normalized) ||
+    /^ps\s+/.test(normalized) ||
+    /^ls\s+-l\s+(?:\/usr\/bin\/(?:firefox|google-chrome|chromium|chromium-browser)|\/home\/\S*browser-use\S*)/.test(normalized)
+}
+
+function browserUseRouteBlockedResult(attempted?: string) {
+  const details = {
+    allowedNext: ["browser-use doctor", "browser-use --headed --session <name> open <url>", "browser-use --session <name> state", "request_user_action"],
+    ...(attempted ? { attempted } : {}),
+  } satisfies JsonObject
+  const metadata = {
+    skillRouteBlocked: true,
+    browserUseRouteBlocked: true,
+    ...(attempted ? { attempted } : {}),
+    activity: {
+      kind: "permission",
+      title: "browser-use route active",
+      summary: "Blocked a non-browser-use fallback while browser-use is the active route.",
+      status: "skipped",
+      details,
+    },
+  } satisfies JsonObject
+  return {
+    ok: false,
+    content: [
+      "browser-use route is active.",
+      "Continue with browser-use CLI commands such as `browser-use doctor`, `browser-use --headed --session <name> open <url>`, `browser-use --session <name> state`, or `request_user_action`.",
+      "Do not use Jina Reader, curl scraping, direct/private APIs, third-party aggregators, temporary scripts, or unrelated fallback routes while browser-use is selected.",
+    ].join("\n"),
+    metadata,
+  }
+}
+
 function activeSkillRouteBlocker(state: SkillRouteState) {
   return (
-    state.blockers.find((item) => item.kind === "user_action_required" && item.skill === "agent-reach") ??
-    state.blockers.find((item) => item.kind === "missing_managed_tool" && item.skill === "agent-reach")
+    state.blockers.find((item) => item.kind === "missing_managed_tool" && item.skill === "browser-use" && state.loadedSkills.has("browser-use")) ??
+    state.blockers.find((item) => item.kind === "user_action_required" && state.loadedSkills.has(item.skill)) ??
+    state.blockers.find((item) => item.kind === "missing_managed_tool" && state.loadedSkills.has(item.skill))
   )
 }
 
@@ -476,8 +643,20 @@ function updateSkillRouteState(
   if (toolName !== "shell") return
   const command = stringJsonValue(metadata?.command) ?? stringJsonValue(input.command)
   if (!command) return
-  if (ok && (isAgentReachCommand(command) || isAllowedAgentReachManagedInstall(toolName, input))) {
-    state.blockers = state.blockers.filter((item) => !(item.kind === "missing_managed_tool" && item.skill === "agent-reach" && item.tool === "agent-reach"))
+  const commandDefinition = managedToolCommandDefinition(command)
+  const installDefinition = managedToolInstallDefinition(toolName, input)
+  const recoveredDefinition = commandDefinition ?? installDefinition
+  if (ok && recoveredDefinition) {
+    state.blockers = state.blockers.filter(
+      (item) => !(item.kind === "missing_managed_tool" && item.skill === recoveredDefinition.skill && item.tool === recoveredDefinition.tool),
+    )
+    return
+  }
+  for (const definition of MANAGED_TOOL_DEFINITIONS) {
+    if (!state.loadedSkills.has(definition.skill)) continue
+    if (!isManagedToolCommand(command, definition)) continue
+    if (!isCommandNotFoundResult(content, metadata, definition)) continue
+    upsertSkillRouteBlocker(state, { kind: "missing_managed_tool", skill: definition.skill, tool: definition.tool })
     return
   }
   if (!state.loadedSkills.has("agent-reach")) return
@@ -486,24 +665,54 @@ function updateSkillRouteState(
     upsertSkillRouteBlocker(state, userActionBlocker)
     return
   }
-  if (!isAgentReachCommand(command)) return
-  if (!isCommandNotFoundResult(content, metadata)) return
-  upsertSkillRouteBlocker(state, { kind: "missing_managed_tool", skill: "agent-reach", tool: "agent-reach" })
 }
 
-function isAllowedAgentReachManagedInstall(toolName: string, input: JsonObject) {
+function isAllowedManagedToolInstall(toolName: string, input: JsonObject, blocker: Extract<SkillRouteBlocker, { kind: "missing_managed_tool" }>) {
+  const definition = managedToolDefinition(blocker.tool, blocker.skill)
+  return Boolean(definition && managedToolInstallDefinition(toolName, input)?.tool === definition.tool)
+}
+
+function isAllowedBrowserUseHandoff(toolName: string, input: JsonObject, blocker: SkillRouteBlocker) {
+  if (blocker.kind !== "user_action_required") return false
+  if (blocker.skill !== "agent-reach") return false
+  if (!["login_required", "qr_scan_required", "captcha_or_2fa_required", "cookie_or_session_required"].includes(blocker.signal)) return false
+  if (toolName === "skill") return stringJsonValue(input.name) === "browser-use"
   if (toolName !== "shell") return false
   const command = stringJsonValue(input.command)
-  return Boolean(command && /\bpixiu\s+tools\s+install\s+agent-reach\b/.test(command))
+  if (!command) return false
+  const browserUse = managedToolDefinition("browser-use", "browser-use")
+  return Boolean(browserUse && (isManagedToolCommand(command, browserUse) || browserUse.installAllowedPattern.test(command)))
 }
 
-function isAgentReachCommand(command: string) {
-  return /(^|[\s;&|()])agent-reach(\s|$)/.test(command) || /\bcommand\s+-v\s+agent-reach\b/.test(command)
+function allowedNextForUserActionBlocker(blocker: Extract<SkillRouteBlocker, { kind: "user_action_required" }>) {
+  const allowed = ["request_user_action"]
+  if (isAllowedBrowserUseHandoff("skill", { name: "browser-use" }, blocker)) {
+    allowed.push("Skill(browser-use)", "browser-use doctor", "browser-use --headed --session <name> open <url>")
+  }
+  return allowed
 }
 
-function isCommandNotFoundResult(content: string, metadata: JsonObject | undefined) {
+function managedToolInstallDefinition(toolName: string, input: JsonObject) {
+  if (toolName !== "shell") return undefined
+  const command = stringJsonValue(input.command)
+  return command ? MANAGED_TOOL_DEFINITIONS.find((definition) => definition.installAllowedPattern.test(command)) : undefined
+}
+
+function managedToolCommandDefinition(command: string) {
+  return MANAGED_TOOL_DEFINITIONS.find((definition) => isManagedToolCommand(command, definition))
+}
+
+function managedToolDefinition(tool: string, skill?: string) {
+  return MANAGED_TOOL_DEFINITIONS.find((definition) => definition.tool === tool && (!skill || definition.skill === skill))
+}
+
+function isManagedToolCommand(command: string, definition: ManagedToolDefinition) {
+  return definition.commandPattern.test(command)
+}
+
+function isCommandNotFoundResult(content: string, metadata: JsonObject | undefined, definition: ManagedToolDefinition) {
   const exitCode = typeof metadata?.exitCode === "number" ? metadata.exitCode : undefined
-  return exitCode === 127 || /(?:agent-reach|command): not found|not recognized/i.test(content)
+  return exitCode === 127 || definition.notFoundPattern.test(content)
 }
 
 function detectUserActionBlocker(content: string, command: string): SkillRouteBlocker | undefined {

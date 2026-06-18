@@ -20,13 +20,17 @@ Use Agent Reach for platform-specific tasks where generic HTML fetch/search is w
 | --- | --- |
 | Search or read Twitter/X | `agent-reach doctor --json`, then `twitter` or OpenCLI backend |
 | Search/read Reddit | `agent-reach doctor --json`, then OpenCLI or `rdt` |
-| Search/read XiaoHongShu | `agent-reach doctor --json`, then OpenCLI, xiaohongshu-mcp, or xhs-cli |
+| Search/read XiaoHongShu | `agent-reach doctor --json`, then the active configured backend; if login/browser authorization blocks Agent Reach, load `Skill(browser-use)` and open the public page |
 | YouTube metadata/subtitles/comments | `yt-dlp`, or `agent-reach transcribe` if no subtitles |
 | Bilibili search/video/subtitle | `bili`, OpenCLI subtitle, or API fallback |
 | GitHub repo/issue/PR/code research | `gh` |
 | RSS feed reading | `feedparser` |
 | LinkedIn jobs/profiles/company data | LinkedIn MCP backend or Jina fallback |
 | Exa semantic/code search | `mcporter call 'exa...'` |
+
+## Browser-Use Handoff
+
+If a XiaoHongShu Agent Reach backend is blocked by login, QR scan, captcha, 2FA, cookie/session, browser authorization, or the user explicitly chooses browser-use/the browser route, stop Agent Reach backend probing and load `Skill(browser-use)`. Choose a fresh task-specific browser-use session name, then run the full visible-browser sequence: `browser-use doctor`, `browser-use --headed --session <session-name> open https://www.xiaohongshu.com`, and `browser-use --session <session-name> state`. A successful `browser-use doctor` is only an availability check; continue to headed `open` before reporting browser-use as attempted. Do not continue with Jina, public/private API probing, third-party aggregators, temporary MCP installs, or scraping scripts after Agent Reach is blocked or browser-use is selected.
 
 ## Install Policy
 
@@ -67,6 +71,7 @@ Stop and ask for help when:
 
 - `agent-reach` is missing and the user has not asked to install it. If they approve installation, use `pixiu tools install agent-reach --yes`.
 - Installing or enabling a channel would add browser tooling, persistent config, MCP services, or login-heavy platform support.
+- A XiaoHongShu backend requires login, QR scan, captcha, 2FA, cookie/session, browser authorization, or the user explicitly chose browser-use/the browser route.
 - A tool says login, cookies, QR scan, captcha, 2FA, browser authorization, API key, account permission, or proxy setup is required.
 - A login flow starts an interactive browser/QR process or downloads browser automation packages.
 - Anonymous access is blocked and the only remaining paths are private endpoints, scraping experiments, or third-party aggregator pages.
@@ -74,7 +79,8 @@ Stop and ask for help when:
 For XiaoHongShu, prefer asking the user to provide one of these authorized states:
 
 - desktop: logged-in browser session plus OpenCLI/browser extension path
-- server: xiaohongshu-mcp QR login
+- server: already-configured xiaohongshu-mcp QR login; do not install or configure MCP inside the task
+- browser fallback: user-approved `Skill(browser-use)` route for visible page inspection
 - fallback: Cookie-Editor export imported through `agent-reach configure xhs-cookies ...`
 
 Do not attempt to bypass authentication with ad hoc HTTP endpoints, Playwright/Camoufox scripts, or repeated blind retries. If the user explicitly requests a fallback outside Agent Reach, explain that it is less reliable and keep it read-only.

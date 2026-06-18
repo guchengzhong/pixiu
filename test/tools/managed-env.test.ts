@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
-import { buildManagedEnvPATH, findAgentReachSource, inspectManagedEnv } from "../../src/tools/managed-env"
+import { BROWSER_USE_PACKAGE_REFS, buildManagedEnvPATH, findAgentReachSource, inspectManagedEnv } from "../../src/tools/managed-env"
 import { defaultConfig, type PixiuConfig } from "../../src/config/defaults"
 
 describe("managed tool environment", () => {
@@ -13,8 +13,9 @@ describe("managed tool environment", () => {
     const binPath = join(envPath, "bin")
     await mkdir(binPath, { recursive: true })
     await writeFile(join(binPath, "agent-reach"), "#!/bin/sh\n", "utf8")
+    await writeFile(join(binPath, "browser-use"), "#!/bin/sh\n", "utf8")
 
-    const status = await inspectManagedEnv(configWithEnvPath(envPath), { tools: ["agent-reach"] })
+    const status = await inspectManagedEnv(configWithEnvPath(envPath))
 
     expect(status.envPath).toBe(envPath)
     expect(status.binPath).toBe(binPath)
@@ -22,6 +23,10 @@ describe("managed tool environment", () => {
     expect(status.tools["agent-reach"]).toMatchObject({
       available: true,
       path: join(binPath, "agent-reach"),
+    })
+    expect(status.tools["browser-use"]).toMatchObject({
+      available: true,
+      path: join(binPath, "browser-use"),
     })
   })
 
@@ -43,6 +48,10 @@ describe("managed tool environment", () => {
 
     await mkdir(join(root, "pixiu"))
     expect(await findAgentReachSource(join(root, "pixiu"))).toBe(source)
+  })
+
+  test("browser-use install includes socks proxy support", () => {
+    expect(BROWSER_USE_PACKAGE_REFS).toEqual(["browser-use[core]", "httpx[socks]"])
   })
 })
 

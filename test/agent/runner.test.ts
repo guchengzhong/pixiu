@@ -281,6 +281,34 @@ describe("agent runner", () => {
     expect(events.some((event) => event.type === "finish" && event.reason === "max_steps")).toBe(false)
   })
 
+  test("continues once after an empty response without tool calls", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-agent-empty-continuation-"))
+    const runner = new AgentRunner({
+      llm: new ScriptedLLMClient([
+        [],
+        [{ type: "text_start" }, { type: "text_delta", text: "FINAL: recovered" }, { type: "text_end", text: "FINAL: recovered" }, { type: "finish", reason: "stop" }],
+      ]),
+      tools: new ToolRegistry(),
+      sessions: new MemorySessionStore(),
+      model: "scripted",
+      systemPrompt: "test",
+      maxSteps: 4,
+      toolContext: {
+        cwd: root,
+        workspaceRoot: root,
+        permissions: new StaticPermissionManager([{ tool: "*", action: "allow" }]),
+        pathGuard: new PathGuard({ workspaceRoot: root, workspaceOnly: true }),
+        config: { shellTimeoutMs: 500, outputMaxBytes: 4_000, envAllowlist: ["PATH"] },
+      },
+    })
+
+    const events = []
+    for await (const event of runner.run({ message: "go" })) events.push(event)
+
+    expect(events.some((event) => event.type === "message" && event.content === "recovered")).toBe(true)
+    expect(events.some((event) => event.type === "error" && event.message.includes("empty response"))).toBe(false)
+  })
+
   test("strips a final marker appended after continuation prose", async () => {
     const root = await mkdtemp(join(tmpdir(), "pixiu-agent-late-final-"))
     const runner = new AgentRunner({
@@ -502,6 +530,96 @@ describe("agent runner", () => {
     })
   })
 
+  test("blocks fallback shell calls after Browser Use skill finds missing CLI", async () => {
+    const executedShellCommands: string[] = []
+    const tools = skillRouteTools((command) => {
+      executedShellCommands.push(command)
+      if (command === "browser-use doctor") {
+        return {
+          ok: false,
+          content: "/bin/sh: 1: browser-use: not found",
+          metadata: { command, exitCode: 127 },
+        }
+      }
+      return { ok: true, content: "unexpected", metadata: { command, exitCode: 0 } }
+    })
+    const { events } = await runScriptedToolSequence(
+      [
+        [{ type: "tool_call", call: { id: "call_skill", name: "skill", input: { name: "browser-use" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "tool_call", call: { id: "call_doctor", name: "shell", input: { command: "browser-use doctor" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "tool_call", call: { id: "call_scrape", name: "shell", input: { command: "python scrape_zhihu.py" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "text_start" }, { type: "text_delta", text: "FINAL: blocked" }, { type: "text_end", text: "FINAL: blocked" }, { type: "finish", reason: "stop" }],
+      ],
+      tools,
+    )
+
+    const blocked = events.find((event) => event.type === "tool_result" && event.id === "call_scrape")
+    expect(executedShellCommands).toEqual(["browser-use doctor"])
+    expect(blocked).toMatchObject({
+      type: "tool_result",
+      ok: false,
+      content: expect.stringContaining("browser-use is missing"),
+      metadata: {
+        skillRouteBlocked: true,
+        blocker: { kind: "missing_managed_tool", skill: "browser-use", tool: "browser-use" },
+        activity: {
+          details: {
+            allowedNext: ["request_user_action", "pixiu tools install browser-use --yes"],
+          },
+        },
+      },
+    })
+  })
+
+  test("allows managed Browser Use installer and clears missing-tool blocker", async () => {
+    const executedShellCommands: string[] = []
+    let doctorAttempts = 0
+    const tools = skillRouteTools((command) => {
+      executedShellCommands.push(command)
+      if (command === "browser-use doctor") {
+        doctorAttempts += 1
+        if (doctorAttempts === 1) {
+          return {
+            ok: false,
+            content: "/bin/sh: 1: browser-use: not found",
+            metadata: { command, exitCode: 127 },
+          }
+        }
+        return { ok: true, content: "browser-use ok", metadata: { command, exitCode: 0 } }
+      }
+      if (command === "pixiu tools install browser-use --yes") {
+        return { ok: true, content: "installed browser-use", metadata: { command, exitCode: 0 } }
+      }
+      return { ok: false, content: `unexpected command: ${command}`, metadata: { command, exitCode: 1 } }
+    })
+    const { events } = await runScriptedToolSequence(
+      [
+        [{ type: "tool_call", call: { id: "call_skill", name: "skill", input: { name: "browser-use" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "tool_call", call: { id: "call_doctor_1", name: "shell", input: { command: "browser-use doctor" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "tool_call", call: { id: "call_install", name: "shell", input: { command: "pixiu tools install browser-use --yes" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "tool_call", call: { id: "call_doctor_2", name: "shell", input: { command: "browser-use doctor" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "text_start" }, { type: "text_delta", text: "FINAL: available" }, { type: "text_end", text: "FINAL: available" }, { type: "finish", reason: "stop" }],
+      ],
+      tools,
+    )
+
+    expect(executedShellCommands).toEqual([
+      "browser-use doctor",
+      "pixiu tools install browser-use --yes",
+      "browser-use doctor",
+    ])
+    expect(events.find((event) => event.type === "tool_result" && event.id === "call_install")).toMatchObject({
+      type: "tool_result",
+      ok: true,
+      content: "installed browser-use",
+    })
+    expect(events.find((event) => event.type === "tool_result" && event.id === "call_doctor_2")).toMatchObject({
+      type: "tool_result",
+      ok: true,
+      content: "browser-use ok",
+    })
+  })
+
   test("auto-installs Agent Reach when managed tool policy allows it", async () => {
     const executedShellCommands: string[] = []
     const installCalls: string[] = []
@@ -559,9 +677,66 @@ describe("agent runner", () => {
     })
   })
 
+  test("auto-installs Browser Use when managed tool policy allows it", async () => {
+    const executedShellCommands: string[] = []
+    const installCalls: string[] = []
+    const tools = skillRouteTools((command) => {
+      executedShellCommands.push(command)
+      if (command === "browser-use doctor") {
+        return {
+          ok: false,
+          content: "/bin/sh: 1: browser-use: not found",
+          metadata: { command, exitCode: 127 },
+        }
+      }
+      return { ok: false, content: `unexpected command: ${command}`, metadata: { command, exitCode: 1 } }
+    })
+    const { events } = await runScriptedToolSequence(
+      [
+        [{ type: "tool_call", call: { id: "call_skill", name: "skill", input: { name: "browser-use" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "tool_call", call: { id: "call_doctor", name: "shell", input: { command: "browser-use doctor" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "text_start" }, { type: "text_delta", text: "FINAL: installed" }, { type: "text_end", text: "FINAL: installed" }, { type: "finish", reason: "stop" }],
+      ],
+      tools,
+      {
+        managedTools: {
+          autoInstall: "allow",
+          async installBrowserUse(input) {
+            installCalls.push(input.cwd)
+            return { exitCode: 0, stdout: "installed browser-use into managed env", stderr: "" }
+          },
+        },
+      },
+    )
+
+    const installCall = events.find(
+      (event): event is Extract<AgentEvent, { type: "tool_call" }> => event.type === "tool_call" && event.name === "shell" && event.id !== "call_doctor",
+    )
+    const installResult = events.find((event) => event.type === "tool_result" && event.name === "shell" && event.id === installCall?.id)
+    expect(executedShellCommands).toEqual(["browser-use doctor"])
+    expect(installCalls).toHaveLength(1)
+    expect(installCall).toMatchObject({
+      type: "tool_call",
+      input: {
+        command: "pixiu tools install browser-use --yes",
+        purpose: "安装 browser-use 到 Pixiu 托管工具环境",
+      },
+    })
+    expect(installResult).toMatchObject({
+      type: "tool_result",
+      ok: true,
+      content: "installed browser-use into managed env",
+      metadata: {
+        managedTool: "browser-use",
+        managedToolAutoInstall: true,
+        activity: { title: "Installed browser-use" },
+      },
+    })
+  })
+
   test("blocks fallback commands after Agent Reach route reports login required", async () => {
     const executedShellCommands: string[] = []
-    const tools = agentReachRouteTools((command) => {
+    const tools = skillRouteTools((command) => {
       executedShellCommands.push(command)
       if (command === "agent-reach doctor --json") {
         return { ok: true, content: "{\"xiaohongshu\":{\"active_backend\":\"xhs-cli\"}}", metadata: { command, exitCode: 0 } }
@@ -597,6 +772,226 @@ describe("agent runner", () => {
         category: "auth",
         blocker: { kind: "user_action_required", skill: "agent-reach", signal: "login_required" },
       },
+    })
+  })
+
+  test("allows browser-use handoff after Agent Reach route reports login required", async () => {
+    const executedShellCommands: string[] = []
+    const tools = skillRouteTools((command) => {
+      executedShellCommands.push(command)
+      if (command === "agent-reach doctor --json") {
+        return { ok: true, content: "{\"xiaohongshu\":{\"active_backend\":\"xhs-cli\"}}", metadata: { command, exitCode: 0 } }
+      }
+      if (command === "xhs search 科技") {
+        return {
+          ok: false,
+          content: "Not logged in. Run `xhs login` first.",
+          metadata: { command, exitCode: 1 },
+        }
+      }
+      if (command === "browser-use doctor") {
+        return { ok: true, content: "browser-use ok", metadata: { command, exitCode: 0 } }
+      }
+      if (command === "browser-use --headed --session pixiu-xiaohongshu-tech open https://www.xiaohongshu.com") {
+        return { ok: true, content: "opened", metadata: { command, exitCode: 0 } }
+      }
+      return { ok: true, content: "unexpected", metadata: { command, exitCode: 0 } }
+    })
+    const { events } = await runScriptedToolSequence(
+      [
+        [{ type: "tool_call", call: { id: "call_skill_agent", name: "skill", input: { name: "agent-reach" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "tool_call", call: { id: "call_doctor", name: "shell", input: { command: "agent-reach doctor --json" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "tool_call", call: { id: "call_search", name: "shell", input: { command: "xhs search 科技" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "tool_call", call: { id: "call_skill_browser", name: "skill", input: { name: "browser-use" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "tool_call", call: { id: "call_browser_doctor", name: "shell", input: { command: "browser-use doctor" } } }, { type: "finish", reason: "tool_calls" }],
+        [
+          {
+            type: "tool_call",
+            call: {
+              id: "call_browser_open",
+              name: "shell",
+              input: { command: "browser-use --headed --session pixiu-xiaohongshu-tech open https://www.xiaohongshu.com" },
+            },
+          },
+          { type: "finish", reason: "tool_calls" },
+        ],
+        [{ type: "text_start" }, { type: "text_delta", text: "FINAL: browser route opened" }, { type: "text_end", text: "FINAL: browser route opened" }, { type: "finish", reason: "stop" }],
+      ],
+      tools,
+    )
+
+    expect(executedShellCommands).toEqual([
+      "agent-reach doctor --json",
+      "xhs search 科技",
+      "browser-use doctor",
+      "browser-use --headed --session pixiu-xiaohongshu-tech open https://www.xiaohongshu.com",
+    ])
+    expect(events.find((event) => event.type === "tool_result" && event.id === "call_skill_browser")).toMatchObject({
+      type: "tool_result",
+      ok: true,
+      content: "Loaded browser-use",
+    })
+    expect(events.find((event) => event.type === "tool_result" && event.id === "call_browser_open")).toMatchObject({
+      type: "tool_result",
+      ok: true,
+      content: "opened",
+    })
+  })
+
+  test("browser-use missing tool blocker takes over after Agent Reach handoff", async () => {
+    const executedShellCommands: string[] = []
+    const tools = skillRouteTools((command) => {
+      executedShellCommands.push(command)
+      if (command === "agent-reach doctor --json") {
+        return { ok: true, content: "{\"xiaohongshu\":{\"active_backend\":\"xhs-cli\"}}", metadata: { command, exitCode: 0 } }
+      }
+      if (command === "xhs feed") {
+        return {
+          ok: false,
+          content: "Not logged in. Run `xhs login` first.",
+          metadata: { command, exitCode: 1 },
+        }
+      }
+      if (command === "browser-use doctor") {
+        return {
+          ok: false,
+          content: "/bin/sh: 1: browser-use: not found",
+          metadata: { command, exitCode: 127 },
+        }
+      }
+      return { ok: true, content: "unexpected", metadata: { command, exitCode: 0 } }
+    })
+    const { events } = await runScriptedToolSequence(
+      [
+        [{ type: "tool_call", call: { id: "call_skill_agent", name: "skill", input: { name: "agent-reach" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "tool_call", call: { id: "call_doctor", name: "shell", input: { command: "agent-reach doctor --json" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "tool_call", call: { id: "call_feed", name: "shell", input: { command: "xhs feed" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "tool_call", call: { id: "call_skill_browser", name: "skill", input: { name: "browser-use" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "tool_call", call: { id: "call_browser_doctor", name: "shell", input: { command: "browser-use doctor" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "tool_call", call: { id: "call_fallback", name: "shell", input: { command: "curl https://r.jina.ai/http://r.jina.ai/http://example.com" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "text_start" }, { type: "text_delta", text: "FINAL: install browser-use" }, { type: "text_end", text: "FINAL: install browser-use" }, { type: "finish", reason: "stop" }],
+      ],
+      tools,
+    )
+
+    const blocked = events.find((event) => event.type === "tool_result" && event.id === "call_fallback")
+    expect(executedShellCommands).toEqual(["agent-reach doctor --json", "xhs feed", "browser-use doctor"])
+    expect(blocked).toMatchObject({
+      type: "tool_result",
+      ok: false,
+      metadata: {
+        skillRouteBlocked: true,
+        blocker: { kind: "missing_managed_tool", skill: "browser-use", tool: "browser-use" },
+        activity: {
+          details: {
+            allowedNext: ["request_user_action", "pixiu tools install browser-use --yes"],
+          },
+        },
+      },
+    })
+  })
+
+  test("blocks Jina and curl fallbacks once Browser Use skill is loaded", async () => {
+    const executedShellCommands: string[] = []
+    const tools = skillRouteTools((command) => {
+      executedShellCommands.push(command)
+      return { ok: true, content: "unexpected", metadata: { command, exitCode: 0 } }
+    })
+    const { events } = await runScriptedToolSequence(
+      [
+        [{ type: "tool_call", call: { id: "call_skill_agent", name: "skill", input: { name: "agent-reach" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "tool_call", call: { id: "call_skill_browser", name: "skill", input: { name: "browser-use" } } }, { type: "finish", reason: "tool_calls" }],
+        [
+          {
+            type: "tool_call",
+            call: {
+              id: "call_jina",
+              name: "shell",
+              input: { command: "curl -s https://r.jina.ai/http://r.jina.ai/http://www.xiaohongshu.com/search_result?keyword=科技" },
+            },
+          },
+          { type: "finish", reason: "tool_calls" },
+        ],
+        [{ type: "text_start" }, { type: "text_delta", text: "FINAL: blocked" }, { type: "text_end", text: "FINAL: blocked" }, { type: "finish", reason: "stop" }],
+      ],
+      tools,
+    )
+
+    const blocked = events.find((event) => event.type === "tool_result" && event.id === "call_jina")
+    expect(executedShellCommands).toEqual([])
+    expect(blocked).toMatchObject({
+      type: "tool_result",
+      ok: false,
+      metadata: {
+        browserUseRouteBlocked: true,
+        skillRouteBlocked: true,
+        activity: {
+          details: {
+            allowedNext: ["browser-use doctor", "browser-use --headed --session <name> open <url>", "browser-use --session <name> state", "request_user_action"],
+          },
+        },
+      },
+    })
+  })
+
+  test("recovers from empty response after browser-use doctor during handoff", async () => {
+    const executedShellCommands: string[] = []
+    const tools = skillRouteTools((command) => {
+      executedShellCommands.push(command)
+      if (command === "agent-reach doctor --json") {
+        return { ok: true, content: "{\"xiaohongshu\":{\"active_backend\":\"xhs-cli\"}}", metadata: { command, exitCode: 0 } }
+      }
+      if (command === "xhs hot") {
+        return {
+          ok: false,
+          content: "Not logged in. Run `xhs login` first.",
+          metadata: { command, exitCode: 1 },
+        }
+      }
+      if (command === "browser-use doctor") {
+        return { ok: true, content: "browser-use ok", metadata: { command, exitCode: 0 } }
+      }
+      if (command === "browser-use --headed --session pixiu-xiaohongshu-tech open https://www.xiaohongshu.com") {
+        return { ok: true, content: "opened", metadata: { command, exitCode: 0 } }
+      }
+      return { ok: true, content: "unexpected", metadata: { command, exitCode: 0 } }
+    })
+    const { events } = await runScriptedToolSequence(
+      [
+        [{ type: "tool_call", call: { id: "call_skill_agent", name: "skill", input: { name: "agent-reach" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "tool_call", call: { id: "call_doctor", name: "shell", input: { command: "agent-reach doctor --json" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "tool_call", call: { id: "call_hot", name: "shell", input: { command: "xhs hot" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "tool_call", call: { id: "call_skill_browser", name: "skill", input: { name: "browser-use" } } }, { type: "finish", reason: "tool_calls" }],
+        [{ type: "tool_call", call: { id: "call_browser_doctor", name: "shell", input: { command: "browser-use doctor" } } }, { type: "finish", reason: "tool_calls" }],
+        [],
+        [
+          {
+            type: "tool_call",
+            call: {
+              id: "call_browser_open",
+              name: "shell",
+              input: { command: "browser-use --headed --session pixiu-xiaohongshu-tech open https://www.xiaohongshu.com" },
+            },
+          },
+          { type: "finish", reason: "tool_calls" },
+        ],
+        [{ type: "text_start" }, { type: "text_delta", text: "FINAL: opened after retry" }, { type: "text_end", text: "FINAL: opened after retry" }, { type: "finish", reason: "stop" }],
+      ],
+      tools,
+      { maxSteps: 10 },
+    )
+
+    expect(executedShellCommands).toEqual([
+      "agent-reach doctor --json",
+      "xhs hot",
+      "browser-use doctor",
+      "browser-use --headed --session pixiu-xiaohongshu-tech open https://www.xiaohongshu.com",
+    ])
+    expect(events.some((event) => event.type === "error" && event.message.includes("empty response"))).toBe(false)
+    expect(events.find((event) => event.type === "tool_result" && event.id === "call_browser_open")).toMatchObject({
+      type: "tool_result",
+      ok: true,
+      content: "opened",
     })
   })
 
@@ -726,7 +1121,7 @@ function echoTools() {
   })
 }
 
-function agentReachRouteTools(shellHandler: (command: string) => { ok: boolean; content: string; metadata?: JsonObject }) {
+function skillRouteTools(shellHandler: (command: string) => { ok: boolean; content: string; metadata?: JsonObject }) {
   return new ToolRegistry()
     .register({
       name: "skill",
@@ -746,6 +1141,8 @@ function agentReachRouteTools(shellHandler: (command: string) => { ok: boolean; 
       },
     })
 }
+
+const agentReachRouteTools = skillRouteTools
 
 function eventTypesAround(events: AgentEvent[], start: AgentEvent["type"], end: AgentEvent["type"]) {
   const startIndex = events.findIndex((event) => event.type === start)

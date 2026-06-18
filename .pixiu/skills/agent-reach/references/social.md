@@ -4,7 +4,7 @@
 
 ## 小红书 / XiaoHongShu（多后端）
 
-小红书有三个后端，**先跑 `agent-reach doctor --json` 看 xiaohongshu 的 `active_backend` 是哪个**，再用对应命令组。
+小红书有多个后端，**先跑 `agent-reach doctor --json` 看 xiaohongshu 的 `active_backend` 是哪个**，再用已经配置好的对应命令组。如果后端要求登录、扫码、验证码、2FA、Cookie/session、浏览器授权，或用户明确选择 browser-use/浏览器方案，停止 Agent Reach 后端探测，加载 `Skill(browser-use)`，选择新的任务专用 session 名，然后完整运行可见浏览器序列：`browser-use doctor`、`browser-use --headed --session <session-name> open https://www.xiaohongshu.com`、`browser-use --session <session-name> state`。`browser-use doctor` 成功只代表 CLI 可用，不能停在这里。
 
 ### 后端 A：OpenCLI（桌面首选，复用浏览器登录态）
 
@@ -27,7 +27,7 @@ opencli xiaohongshu user USER_ID -f yaml
 
 > 要求 Chrome 打开且装了 OpenCLI 扩展。报 AUTH_REQUIRED 说明浏览器里没登录小红书，让用户在 Chrome 里登录一次即可。
 
-### 后端 B：xiaohongshu-mcp（服务器场景）
+### 后端 B：xiaohongshu-mcp（已配置服务器场景）
 
 ```bash
 # 未登录时：先查状态，再取二维码给用户扫
@@ -41,7 +41,7 @@ mcporter call 'xiaohongshu.search_feeds(keyword: "query")' --timeout 120000
 mcporter call 'xiaohongshu.get_feed_detail(feed_id: "...", xsec_token: "...")' --timeout 120000
 ```
 
-> 首次调用会自动下载约 150MB 无头浏览器，务必带 `--timeout 120000`。未登录时 search 会挂死，先 check_login_status。
+> 只在 xiaohongshu-mcp 已经配置时使用。不要在用户任务中临时安装、配置或启动新的 MCP 服务。首次调用可能下载约 150MB 无头浏览器，必须先得到用户明确同意；未登录时 search 会挂死，先 check_login_status。
 
 ### 后端 C：xhs-cli（存量备选，上游 2026-03 起停更）
 
@@ -53,7 +53,19 @@ xhs hot                     # 热门
 xhs feed                    # 推荐
 ```
 
-> 已知不稳定：`xhs user` / `xhs user-posts` / `xhs favorites` 可能返回 API error（上游停更无人修）。新装用户建议直接走后端 A/B。
+> 已知不稳定：`xhs user` / `xhs user-posts` / `xhs favorites` 可能返回 API error（上游停更无人修）。新装用户不要自动安装新后端；如果后端需要登录/授权或用户选择浏览器方案，改走 `Skill(browser-use)`。
+
+### Browser-use 可视化 fallback
+
+当 Agent Reach 小红书后端要求登录、扫码、验证码、2FA、Cookie/session、浏览器授权，或用户明确说“用 browser-use”“用浏览器打开”“浏览器方案”或类似要求时，不要继续尝试 Jina、公开/私有 API、第三方聚合页、临时 MCP 安装或 scraping 脚本。加载 `Skill(browser-use)`，选择一个新的任务专用 session 名，并完整运行可见官方页面序列：
+
+```bash
+browser-use doctor
+browser-use --headed --session <session-name> open https://www.xiaohongshu.com
+browser-use --session <session-name> state
+```
+
+`browser-use doctor` 成功只代表 CLI 可用，不能停在这里；继续 headed open，让用户能看到并接管浏览器。如果页面要求登录、扫码、验证码、2FA、Cookie/session、浏览器 profile 或账号授权，调用 `request_user_action`，让用户在打开的浏览器窗口中完成；不要尝试绕过。用户回复继续后，继续运行 `browser-use --session <session-name> state`。
 
 ### 通用注意事项
 

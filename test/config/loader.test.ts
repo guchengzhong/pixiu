@@ -11,6 +11,9 @@ describe("config loader", () => {
     const config = await loadConfig({ cwd: root })
     expect(config.agents.default?.maxSteps).toBeGreaterThan(0)
     expect(config.ui.accentColor).toBe("#3B8EEA")
+    expect(config.sandbox.envAllowlist).toEqual(
+      expect.arrayContaining(["DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]),
+    )
     expect(config.tools.managedEnv).toMatchObject({
       enabled: true,
       manager: "conda",

@@ -76,6 +76,22 @@ describe("skill tool", () => {
     const prompt = await renderSkillSystemPrompt(new SkillLoader([root]))
     expect(prompt).toContain("21 installed local skills")
     expect(prompt).toContain("skill_search")
+    expect(prompt).toContain("matches a skill name, trigger, platform, URL/domain, or described capability")
+    expect(prompt).toContain("then load the matching Skill")
     expect(prompt).not.toContain("- skill-0:")
+  })
+
+  test("directs trigger matches to load the matching skill before generic tools", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-skill-tool-trigger-"))
+    await mkdir(join(root, "agent-reach"), { recursive: true })
+    await writeFile(
+      join(root, "agent-reach", "SKILL.md"),
+      "---\nname: agent-reach\ndescription: Platform access\ntriggers:\n  - 小红书\n  - xhs\n---\nbody",
+      "utf8",
+    )
+
+    const prompt = await renderSkillSystemPrompt(new SkillLoader([root]))
+    expect(prompt).toContain("triggers: 小红书, xhs")
+    expect(prompt).toContain("call the skill tool to load the matching SKILL.md before using generic web, shell, temporary scripts, or direct APIs")
   })
 })

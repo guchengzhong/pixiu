@@ -22,7 +22,7 @@ import { AgentRunner } from "../agent/runner"
 import { createMCPClient } from "../mcp/status"
 import { mcpToolsToDefinitions } from "../mcp/tools"
 import { PixiuError } from "../shared/errors"
-import { installAgentReach, managedEnvPathPrepend } from "../tools/managed-env"
+import { installAgentReach, installBrowserUse, managedEnvPathPrepend } from "../tools/managed-env"
 
 export type RuntimeOptions = {
   cwd?: string
@@ -140,6 +140,7 @@ export async function buildRuntime(options: RuntimeOptions = {}): Promise<Runtim
     managedTools: {
       autoInstall: config.tools.managedEnv.autoInstall,
       installAgentReach: ({ cwd }: { cwd: string }) => installAgentReach(config, { cwd }),
+      installBrowserUse: ({ cwd }: { cwd: string }) => installBrowserUse(config, { cwd }),
     },
     toolContext: createToolContext(cwd),
     toolContextForSession,

@@ -136,13 +136,13 @@ export async function renderSkillSystemPrompt(loader: SkillLoader) {
   if (skills.length > SKILL_PROMPT_LIST_LIMIT) {
     return [
       `Available skills: ${skills.length} installed local skills.`,
-      "Use the skill_search tool to retrieve candidate skills before calling the skill tool. Load the full SKILL.md only when needed.",
+      "If the user request matches a skill name, trigger, platform, URL/domain, or described capability, use skill_search to retrieve candidates before other task tools, then load the matching Skill. Load the full SKILL.md only for the selected skill.",
     ].join("\n")
   }
   return [
     "Available skills:",
     ...skills.map((skill) => `- ${skill.name}: ${skill.description}${skill.contract?.triggers?.length ? ` (triggers: ${skill.contract.triggers.join(", ")})` : ""}`),
-    "Use the skill tool to load the full SKILL.md only when needed. If the skill result lists reference files, call the skill tool again with { name, path } to load one safely.",
+    "If the user request matches a skill name, trigger, platform, URL/domain, or described capability, call the skill tool to load the matching SKILL.md before using generic web, shell, temporary scripts, or direct APIs. If the skill result lists reference files, call the skill tool again with { name, path } to load one safely.",
   ].join("\n")
 }
 

@@ -35,7 +35,7 @@ import { collectSessionEvidence, type SessionEvidence } from "../session/evidenc
 import type { JsonObject } from "../shared/json"
 import type { PermissionDecision, PermissionMode, PermissionRequest } from "../permission/types"
 import type { SkillLoader } from "../skills/loader"
-import { createManagedEnv, findAgentReachSource, inspectManagedEnv, installAgentReach, type ManagedEnvStatus } from "../tools/managed-env"
+import { BROWSER_USE_PACKAGE_REFS, createManagedEnv, findAgentReachSource, inspectManagedEnv, installAgentReach, installBrowserUse, type ManagedEnvStatus } from "../tools/managed-env"
 
 const VERSION = "0.0.0"
 const CHAT_CTRL_C = "__PIXIU_CTRL_C__"
@@ -82,6 +82,7 @@ Inspect:
   pixiu tools env create
   pixiu tools env path
   pixiu tools install agent-reach
+  pixiu tools install browser-use
   pixiu tools doctor
   pixiu session list
   pixiu session resume
@@ -295,7 +296,7 @@ async function doctor(args: string[] = []): Promise<CliResult> {
     ["provider", providerKeyPresent ? "ok" : "warn", providerDetail],
     ["sessions", "ok", ".pixiu/state/sessions"],
     ["workspace", "ok", `${config.sandbox.mode} (${config.sandbox.workspaceDir})`],
-    ["tools", managedTools.enabled && managedTools.managerAvailable ? "ok" : "warn", `${managedTools.manager} ${managedTools.name}, agent-reach ${managedTools.tools["agent-reach"]?.available ? "available" : "missing"}`],
+    ["tools", managedTools.enabled && managedTools.managerAvailable ? "ok" : "warn", `${managedTools.manager} ${managedTools.name}, ${formatManagedToolSummary(managedTools)}`],
     ["skills", skillDiagnostics.length ? "warn" : "ok", `${runtime.config.skills.paths.length} paths, ${skillDiagnostics.length} diagnostics`],
     ["mcp", mcpStatuses.some((server) => server.status === "failed") ? "warn" : "ok", `${mcpStatuses.length} configured`],
   ]
@@ -1712,26 +1713,42 @@ async function toolsCommand(args: string[]): Promise<CliResult> {
   }
   if (section === "install") {
     const tool = subcommand
-    if (tool !== "agent-reach") throw new PixiuError("tools install currently supports: agent-reach", { code: "CLI_USAGE" })
+    if (tool !== "agent-reach" && tool !== "browser-use") {
+      throw new PixiuError("tools install currently supports: agent-reach, browser-use", { code: "CLI_USAGE" })
+    }
     const sourceFlag = takeFlagValue(rest, "--source")
-    const sourcePath = sourceFlag.value || await findAgentReachSource(process.cwd())
+    if (tool === "browser-use" && sourceFlag.value) {
+      throw new PixiuError("--source is only supported for agent-reach installs", { code: "CLI_USAGE" })
+    }
+    const sourcePath = tool === "agent-reach" ? sourceFlag.value || await findAgentReachSource(process.cwd()) : undefined
+    const packageRef = tool === "agent-reach" ? sourcePath ?? "agent-reach package" : BROWSER_USE_PACKAGE_REFS.join(" ")
     if (!yes) {
       const status = await inspectManagedEnv(config)
       return {
         exitCode: 0,
         output: [
           "Managed tool install preview.",
-          "tool: agent-reach",
+          `tool: ${tool}`,
           `manager: ${status.manager}`,
           `env: ${status.name}`,
           `path: ${status.envPath}`,
-          `source: ${sourcePath ?? "agent-reach package"}`,
+          `package: ${packageRef}`,
+          ...(tool === "browser-use"
+            ? [
+                "",
+                "This installs only the upstream browser-use CLI into Pixiu's managed environment.",
+                "It also installs httpx socks support so browser-use can run when the user shell has SOCKS proxy variables.",
+                "It does not enable browser-use cloud mode, profiles, cookies, saved sessions, or login automation.",
+              ]
+            : []),
           "",
-          "Run `pixiu tools install agent-reach --yes` to install into the managed environment.",
+          `Run \`pixiu tools install ${tool} --yes\` to install into the managed environment.`,
         ].join("\n"),
       }
     }
-    const result = await installAgentReach(config, sourcePath ? { sourcePath } : {})
+    const result = tool === "agent-reach"
+      ? await installAgentReach(config, sourcePath ? { sourcePath } : {})
+      : await installBrowserUse(config)
     return { exitCode: result.exitCode === 0 ? 0 : 1, output: [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n") }
   }
   if (section === "doctor") {
@@ -1739,7 +1756,7 @@ async function toolsCommand(args: string[]): Promise<CliResult> {
     if (json) return { exitCode: 0, output: JSON.stringify(status, null, 2) }
     return { exitCode: 0, output: formatManagedEnvStatus(status) }
   }
-  throw new PixiuError("tools requires env status, env create, env path, install agent-reach, or doctor", { code: "CLI_USAGE" })
+  throw new PixiuError("tools requires env status, env create, env path, install agent-reach, install browser-use, or doctor", { code: "CLI_USAGE" })
 }
 
 async function uiCommand(args: string[]): Promise<CliResult> {
@@ -2427,6 +2444,12 @@ function formatManagedEnvStatus(status: ManagedEnvStatus) {
     "Installed tools",
     ...(tools.length ? tools.map((tool) => `${tool.command}: ${tool.available ? tool.path ?? "available" : "missing"}`) : ["none"]),
   ].join("\n")
+}
+
+function formatManagedToolSummary(status: ManagedEnvStatus) {
+  const tools = Object.values(status.tools)
+  if (!tools.length) return "no managed tools checked"
+  return tools.map((tool) => `${tool.command} ${tool.available ? "available" : "missing"}`).join(", ")
 }
 
 function formatSkillList(skills: Array<{ name: string; description: string; source: { relativePath: string } }>) {
