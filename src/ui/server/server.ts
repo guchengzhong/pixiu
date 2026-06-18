@@ -19,16 +19,18 @@ import { OpenAICompatibleClient } from "../../llm/openai"
 import { buildRuntime, type Runtime, type RuntimeWithoutLLM } from "../../runtime/build"
 import { formatError, PixiuError } from "../../shared/errors"
 import { readJsoncFile } from "../../shared/json"
-import type { JsonValue } from "../../shared/json"
-import type { SessionRecord } from "../../session/types"
+import type { JsonObject, JsonValue } from "../../shared/json"
+import type { ProjectRecord, SessionMessage, SessionRecord } from "../../session/types"
+import { DEFAULT_PROJECT_ID } from "../../session/projects"
 import { collectSessionEvidence } from "../../session/evidence"
-import { apiFailure, apiSuccess, type ApiFailure, type UiConfigResponse, type UiProviderSummary, type UiSessionSummary, type UiStatus } from "../shared/api"
+import { apiFailure, apiSuccess, type ApiFailure, type UiConfigResponse, type UiProjectSummary, type UiProviderSummary, type UiSessionSummary, type UiStatus } from "../shared/api"
 import type { PermissionDecision, PermissionMode, PermissionRequest } from "../../permission/types"
 import type { AgentEvent } from "../../agent/events"
 import { PathGuard } from "../../sandbox/path"
 import { createID } from "../../shared/id"
 import { redactSecrets } from "../../shared/redact"
 import { inspectMCPServers } from "../../mcp/status"
+import type { MCPServerStatus } from "../../mcp/types"
 import {
   isTerminalRunStatus,
   normalizePersistedRunStatus,
@@ -99,6 +101,25 @@ type RunInput = {
 
 type SessionCreateInput = {
   title?: unknown
+  projectId?: unknown
+}
+
+type ProjectCreateInput = {
+  name?: unknown
+  rootPath?: unknown
+}
+
+type ProjectUpdateInput = {
+  name?: unknown
+  rootPath?: unknown
+}
+
+type SessionUpdateInput = {
+  title?: unknown
+}
+
+type SessionMoveInput = {
+  projectId?: unknown
 }
 
 type UiFileSummary = {
@@ -275,17 +296,96 @@ async function routeApi(request: Request, url: URL, context: UiServerContext): P
     return jsonResponse(apiSuccess(await testProvider(context)))
   }
 
+  if (request.method === "GET" && url.pathname === "/api/skills") {
+    const runtime = await runtimeFor(context)
+    const skills = await runtime.skills.list()
+    const withReferences = await Promise.all(skills.map(async (skill) => ({
+      ...skill,
+      referenceCount: (await runtime.skills.files(skill.name)).length,
+    })))
+    return jsonResponse(apiSuccess({ skills: withReferences }))
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/mcp") {
+    const runtime = await runtimeFor(context)
+    const statuses = await inspectMCPServers(runtime.config)
+    return jsonResponse(apiSuccess({ servers: statuses.map((status) => mcpServerSummary(status, runtime.config.mcp[status.name])) }))
+  }
+
   if (request.method === "GET" && url.pathname === "/api/sessions") {
     const runtime = await runtimeFor(context)
-    const sessions = await runtime.sessions.listSessions()
-    return jsonResponse(apiSuccess({ sessions: sessions.map(sessionSummary) }))
+    const projectId = url.searchParams.get("projectId") ?? undefined
+    const project = projectId ? await runtime.projects.get(projectId) : undefined
+    if (projectId && !project) throw new PixiuError(`Unknown project: ${projectId}`, { code: "PROJECT_NOT_FOUND" })
+    const fallbackProjectId = await fallbackProjectIdFor(runtime)
+    const sessions = visibleSessions(await runtime.sessions.listSessions())
+      .filter((session) => !projectId || sessionProjectId(session, fallbackProjectId) === projectId)
+    return jsonResponse(apiSuccess({ sessions: await Promise.all(sessions.map((session) => sessionSummary(session, fallbackProjectId))) }))
   }
 
   if (request.method === "POST" && url.pathname === "/api/sessions") {
     const input = await readJsonBody<SessionCreateInput>(request)
     const runtime = await runtimeFor(context)
     const session = await createUiSession(runtime, input)
-    return jsonResponse(apiSuccess({ session: sessionSummary(session), files: await listSessionFiles(session) }))
+    const fallbackProjectId = await fallbackProjectIdFor(runtime)
+    return jsonResponse(apiSuccess({ session: await sessionSummary(session, fallbackProjectId), files: await listSessionFiles(session) }))
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/projects") {
+    const runtime = await runtimeFor(context)
+    const sessions = visibleSessions(await runtime.sessions.listSessions())
+    const projects = await runtime.projects.list()
+    const currentProject = await runtime.projects.current()
+    const fallbackProjectId = fallbackProjectIdFromProjects(projects)
+    return jsonResponse(apiSuccess({
+      projects: projects.map((project) => projectSummary(project, sessions, fallbackProjectId)),
+      currentProjectId: currentProject.id,
+    }))
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/projects") {
+    const input = await readJsonBody<ProjectCreateInput>(request)
+    const runtime = await runtimeFor(context)
+    const project = await runtime.projects.create({
+      ...(typeof input.name === "string" ? { name: input.name } : {}),
+      ...(typeof input.rootPath === "string" ? { rootPath: input.rootPath } : {}),
+    })
+    return jsonResponse(apiSuccess({ project: projectSummary(project, [], project.id) }))
+  }
+
+  const projectMatch = url.pathname.match(/^\/api\/projects\/([^/]+)$/)
+  if (projectMatch && request.method === "PATCH") {
+    const input = await readJsonBody<ProjectUpdateInput>(request)
+    const runtime = await runtimeFor(context)
+    const project = await runtime.projects.update(decodeURIComponent(projectMatch[1] ?? ""), {
+      ...(typeof input.name === "string" ? { name: input.name } : {}),
+      ...(typeof input.rootPath === "string" ? { rootPath: input.rootPath } : {}),
+    })
+    const fallbackProjectId = await fallbackProjectIdFor(runtime)
+    const sessions = visibleSessions(await runtime.sessions.listSessions())
+    return jsonResponse(apiSuccess({ project: projectSummary(project, sessions, fallbackProjectId) }))
+  }
+
+  if (projectMatch && request.method === "DELETE") {
+    const runtime = await runtimeFor(context)
+    const projectId = decodeURIComponent(projectMatch[1] ?? "")
+    const fallbackProjectId = await fallbackProjectIdFor(runtime)
+    const sessions = visibleSessions(await runtime.sessions.listSessions())
+    const sessionCount = sessions.filter((session) => sessionProjectId(session, fallbackProjectId) === projectId).length
+    if (sessionCount > 0) {
+      throw new PixiuError("Project is not empty. Move or remove sessions from this project first.", { code: "PROJECT_NOT_EMPTY" })
+    }
+    const removed = await runtime.projects.remove(projectId)
+    return jsonResponse(apiSuccess({ project: projectSummary(removed, [], fallbackProjectId) }))
+  }
+
+  const projectSelectMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/select$/)
+  if (projectSelectMatch && request.method === "POST") {
+    const runtime = await runtimeFor(context)
+    const project = await runtime.projects.setCurrent(decodeURIComponent(projectSelectMatch[1] ?? ""))
+    const fallbackProjectId = await fallbackProjectIdFor(runtime)
+    const sessions = visibleSessions(await runtime.sessions.listSessions())
+    return jsonResponse(apiSuccess({ project: projectSummary(project, sessions, fallbackProjectId) }))
   }
 
   const sessionUploadMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/uploads$/)
@@ -293,6 +393,7 @@ async function routeApi(request: Request, url: URL, context: UiServerContext): P
     const runtime = await runtimeFor(context)
     const session = await requireSession(runtime, decodeURIComponent(sessionUploadMatch[1] ?? ""))
     const files = await uploadSessionFiles(session, request)
+    await persistUploadedFileRefs(runtime, session, files)
     return jsonResponse(apiSuccess({ files }))
   }
 
@@ -315,15 +416,70 @@ async function routeApi(request: Request, url: URL, context: UiServerContext): P
   if (request.method === "GET" && sessionDetailMatch) {
     const runtime = await runtimeFor(context)
     const session = await requireSession(runtime, decodeURIComponent(sessionDetailMatch[1] ?? ""))
+    if (isDeletedSession(session)) throw new PixiuError(`Unknown session: ${session.id}`, { code: "SESSION_NOT_FOUND" })
     const messages = await runtime.sessions.readMessages(session.id)
+    const fallbackProjectId = await fallbackProjectIdFor(runtime)
     return jsonResponse(apiSuccess({
-      session: sessionSummary(session),
+      session: await sessionSummary(session, fallbackProjectId, messages),
       messages,
       evidence: collectSessionEvidence(messages),
       files: await listSessionFiles(session),
       todos: await runtime.sessions.getTodos(session.id),
       activity: sessionActivity(session),
     }))
+  }
+
+  if (request.method === "PATCH" && sessionDetailMatch) {
+    const input = await readJsonBody<SessionUpdateInput>(request)
+    const runtime = await runtimeFor(context)
+    const session = await requireSession(runtime, decodeURIComponent(sessionDetailMatch[1] ?? ""))
+    if (isDeletedSession(session)) throw new PixiuError(`Unknown session: ${session.id}`, { code: "SESSION_NOT_FOUND" })
+    const title = typeof input.title === "string" && input.title.trim() ? input.title.trim().slice(0, 100) : undefined
+    if (!title) throw new PixiuError("title is required", { code: "SESSION_UPDATE_INVALID" })
+    const metadata = sessionMetadata(session)
+    const updated = await runtime.sessions.updateSession(session.id, {
+      title,
+      metadata: {
+        ...metadata,
+        titleSource: "user",
+      },
+    })
+    const fallbackProjectId = await fallbackProjectIdFor(runtime)
+    return jsonResponse(apiSuccess({ session: await sessionSummary(updated, fallbackProjectId) }))
+  }
+
+  if (request.method === "DELETE" && sessionDetailMatch) {
+    const runtime = await runtimeFor(context)
+    const session = await requireSession(runtime, decodeURIComponent(sessionDetailMatch[1] ?? ""))
+    const metadata = sessionMetadata(session)
+    const updated = await runtime.sessions.updateSession(session.id, {
+      metadata: {
+        ...metadata,
+        deletedAt: new Date().toISOString(),
+      },
+    })
+    const fallbackProjectId = await fallbackProjectIdFor(runtime)
+    return jsonResponse(apiSuccess({ session: await sessionSummary(updated, fallbackProjectId) }))
+  }
+
+  const sessionMoveMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/move$/)
+  if (request.method === "POST" && sessionMoveMatch) {
+    const input = await readJsonBody<SessionMoveInput>(request)
+    const runtime = await runtimeFor(context)
+    const projectId = typeof input.projectId === "string" ? input.projectId.trim() : ""
+    if (!projectId) throw new PixiuError("projectId is required", { code: "SESSION_MOVE_INVALID" })
+    const project = await runtime.projects.get(projectId)
+    if (!project) throw new PixiuError(`Unknown project: ${projectId}`, { code: "PROJECT_NOT_FOUND" })
+    const session = await requireSession(runtime, decodeURIComponent(sessionMoveMatch[1] ?? ""))
+    if (isDeletedSession(session)) throw new PixiuError(`Unknown session: ${session.id}`, { code: "SESSION_NOT_FOUND" })
+    const updated = await runtime.sessions.updateSession(session.id, {
+      metadata: {
+        ...sessionMetadata(session),
+        projectId: project.id,
+      },
+    })
+    const fallbackProjectId = await fallbackProjectIdFor(runtime)
+    return jsonResponse(apiSuccess({ session: await sessionSummary(updated, fallbackProjectId) }))
   }
 
   if (request.method === "POST" && url.pathname === "/api/runs") {
@@ -977,33 +1133,112 @@ async function mcpSummary(config: PixiuConfig) {
   }
 }
 
-function sessionSummary(session: SessionRecord): UiSessionSummary {
-  const metadata = session.metadata && typeof session.metadata === "object" && !Array.isArray(session.metadata) ? session.metadata : {}
+function mcpServerSummary(status: MCPServerStatus, config: PixiuConfig["mcp"][string] | undefined) {
+  return {
+    ...status,
+    enabled: config?.enabled !== false,
+    ...(config?.command ? { command: [config.command, ...(config.args ?? [])].join(" ") } : {}),
+    ...(config?.url ? { url: config.url } : {}),
+  }
+}
+
+async function fallbackProjectIdFor(runtime: RuntimeWithoutLLM) {
+  return fallbackProjectIdFromProjects(await runtime.projects.list())
+}
+
+function fallbackProjectIdFromProjects(projects: ProjectRecord[]) {
+  return projects.find((project) => project.id === DEFAULT_PROJECT_ID)?.id ?? projects[0]?.id ?? DEFAULT_PROJECT_ID
+}
+
+function projectSummary(project: ProjectRecord, sessions: SessionRecord[], fallbackProjectId: string): UiProjectSummary {
+  const projectSessions = sessions.filter((session) => sessionProjectId(session, fallbackProjectId) === project.id)
+  return {
+    id: project.id,
+    name: project.name,
+    rootPath: project.rootPath,
+    createdAt: project.createdAt,
+    updatedAt: project.updatedAt,
+    sessionCount: projectSessions.length,
+    ...(projectSessions[0]?.id ? { lastSessionId: projectSessions[0].id } : {}),
+  }
+}
+
+async function sessionSummary(
+  session: SessionRecord,
+  fallbackProjectId: string,
+  messages?: SessionMessage[],
+): Promise<UiSessionSummary> {
+  const metadata = sessionMetadata(session)
   const workspaceDir = typeof metadata.workspaceDir === "string" ? metadata.workspaceDir : undefined
   const model = typeof metadata.model === "string" ? metadata.model : undefined
   const finishStatus = normalizePersistedRunStatus(metadata.finishStatus)
+  const projectId = sessionProjectId(session, fallbackProjectId)
+  const titleSource = metadata.titleSource === "user" ? "user" : metadata.titleSource === "auto" ? "auto" : undefined
+  const activity = sessionActivity(session)
+  const detailMessages = messages ?? []
+  const evidence = detailMessages.length ? collectSessionEvidence(detailMessages) : undefined
+  const preview = previewFromMessages(detailMessages)
   return {
     id: session.id,
+    projectId,
     cwd: session.cwd,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     ...(session.title ? { title: session.title } : {}),
+    ...(titleSource ? { titleSource } : {}),
     ...(model ? { model } : {}),
     ...(finishStatus ? { finishStatus } : {}),
     ...(workspaceDir ? { workspaceDir } : {}),
+    ...(preview ? { preview } : {}),
+    ...(evidence ? { artifactCount: evidence.artifacts.length } : {}),
+    ...(activity.length ? { activityCount: activity.length } : {}),
     summaryApproxTokens: session.summary ? approximateTokens(session.summary) : 0,
   }
 }
 
 function sessionActivity(session: SessionRecord | undefined) {
-  const metadata = session?.metadata && typeof session.metadata === "object" && !Array.isArray(session.metadata) ? session.metadata : {}
+  const metadata = sessionMetadata(session)
   return normalizePersistedActivityItems(metadata.activity)
+}
+
+function sessionMetadata(session: SessionRecord | undefined): JsonObject {
+  return session?.metadata && typeof session.metadata === "object" && !Array.isArray(session.metadata) ? { ...session.metadata } : {}
+}
+
+function sessionProjectId(session: SessionRecord, fallbackProjectId: string) {
+  const metadata = sessionMetadata(session)
+  return typeof metadata.projectId === "string" && metadata.projectId.trim() ? metadata.projectId.trim() : fallbackProjectId
+}
+
+function visibleSessions(sessions: SessionRecord[]) {
+  return sessions.filter((session) => !isDeletedSession(session))
+}
+
+function isDeletedSession(session: SessionRecord) {
+  const metadata = sessionMetadata(session)
+  return typeof metadata.deletedAt === "string" && Boolean(metadata.deletedAt)
+}
+
+function previewFromMessages(messages: SessionMessage[]) {
+  for (const message of messages) {
+    if (message.role !== "user") continue
+    const text = message.parts
+      .filter((part): part is Extract<SessionMessage["parts"][number], { type: "text" }> => part.type === "text")
+      .map((part) => part.text)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim()
+    if (text) return text.slice(0, 160)
+  }
+  return undefined
 }
 
 async function updateUiSessionRunMetadata(runtime: Runtime, run: UiRunRecord) {
   if (!run.sessionId) return
   const session = await runtime.sessions.getSession(run.sessionId)
-  const metadata = session?.metadata && typeof session.metadata === "object" && !Array.isArray(session.metadata) ? session.metadata : {}
+  const metadata = sessionMetadata(session)
+  const messages = session ? await runtime.sessions.readMessages(session.id) : []
+  const artifacts = session ? await artifactRefsForSession(session, messages) : []
   await runtime.sessions.updateSession(run.sessionId, {
     metadata: {
       ...metadata,
@@ -1011,6 +1246,7 @@ async function updateUiSessionRunMetadata(runtime: Runtime, run: UiRunRecord) {
       finishStatus: terminalRunStatus(run.status),
       finishReason: run.finishReason,
       lastRunId: run.id,
+      artifacts,
       activity: limitActivityItems([
         ...sessionActivity(session),
         ...run.activity.map((item) => ({
@@ -1022,9 +1258,64 @@ async function updateUiSessionRunMetadata(runtime: Runtime, run: UiRunRecord) {
   })
 }
 
+async function persistUploadedFileRefs(runtime: RuntimeWithoutLLM, session: SessionRecord, files: UiFileSummary[]) {
+  if (!files.length) return
+  const metadata = sessionMetadata(session)
+  const existing = Array.isArray(metadata.fileReferences) ? metadata.fileReferences : []
+  const byKey = new Map<string, JsonValue>()
+  for (const item of existing) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue
+    const path = typeof item.path === "string" ? item.path : undefined
+    const source = typeof item.source === "string" ? item.source : "uploaded"
+    if (path) byKey.set(`${source}:${path}`, item)
+  }
+  const createdAt = new Date().toISOString()
+  for (const file of files) {
+    byKey.set(`uploaded:${file.path}`, {
+      path: file.path,
+      source: "uploaded",
+      size: file.size,
+      kind: file.kind,
+      createdAt,
+    })
+  }
+  await runtime.sessions.updateSession(session.id, {
+    metadata: {
+      ...metadata,
+      fileReferences: [...byKey.values()],
+    },
+  })
+}
+
+async function artifactRefsForSession(session: SessionRecord, messages: SessionMessage[]) {
+  const evidence = collectSessionEvidence(messages)
+  const guard = new PathGuard({ workspaceRoot: session.cwd, workspaceOnly: true })
+  const refs: JsonObject[] = []
+  for (const artifact of evidence.artifacts) {
+    let exists = false
+    try {
+      await stat(guard.resolvePath(artifact.path).absolutePath)
+      exists = true
+    } catch (error: any) {
+      if (error?.code !== "ENOENT") throw error
+    }
+    refs.push({
+      path: artifact.path,
+      kind: "artifact",
+      tool: artifact.tool,
+      createdAt: artifact.createdAt,
+      sourceToolCallId: artifact.messageId,
+      exists,
+    })
+  }
+  return refs
+}
+
 async function createUiSession(runtime: RuntimeWithoutLLM, input: SessionCreateInput) {
   const id = createID("session")
   const title = typeof input.title === "string" && input.title.trim() ? input.title.trim().slice(0, 80) : "New chat"
+  const projectId = typeof input.projectId === "string" && input.projectId.trim() ? input.projectId.trim() : (await runtime.projects.current()).id
+  if (!(await runtime.projects.get(projectId))) throw new PixiuError(`Unknown project: ${projectId}`, { code: "PROJECT_NOT_FOUND" })
   if (runtime.config.sandbox.mode === "workspace") {
     const workspaceRoot =
       runtime.config.sandbox.workspaceDir && isAbsolute(runtime.config.sandbox.workspaceDir)
@@ -1037,6 +1328,8 @@ async function createUiSession(runtime: RuntimeWithoutLLM, input: SessionCreateI
       cwd: sessionRoot,
       title,
       metadata: {
+        projectId,
+        titleSource: "user",
         sandboxMode: "workspace",
         workspaceDir: relative(runtime.cwd, sessionRoot),
         model: providerSummary(runtime.config).model,
@@ -1049,6 +1342,8 @@ async function createUiSession(runtime: RuntimeWithoutLLM, input: SessionCreateI
     cwd: runtime.cwd,
     title,
     metadata: {
+      projectId,
+      titleSource: "user",
       sandboxMode: runtime.config.sandbox.mode,
       workspaceDir: ".",
       model: providerSummary(runtime.config).model,

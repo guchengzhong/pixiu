@@ -74,12 +74,12 @@ export function StructuredCards({
           <strong>{toolSummary.total}</strong>
         </div>
         {toolSummary.total ? (
-          <button className="card-body-action" type="button" onClick={() => onOpenInspector("trace")}>
+          <button className="card-body-action" type="button" onClick={() => onOpenInspector("activity")}>
             <span>{toolSummary.names.join(", ")}</span>
             <small>{toolSummary.failed} failed · open Activity</small>
           </button>
         ) : (
-          <button className="card-body-action muted" type="button" onClick={() => onOpenInspector("trace")}>
+          <button className="card-body-action muted" type="button" onClick={() => onOpenInspector("activity")}>
             <span>No tool calls yet</span>
             <small>Open Activity</small>
           </button>
@@ -123,7 +123,7 @@ export function StructuredCards({
             {progress.total ? `${progress.completed}/${progress.total}` : runId ? runStatusLabel : "Ready"}
           </strong>
         </div>
-        <button className="card-body-action" type="button" onClick={() => onOpenInspector("trace")}>
+        <button className="card-body-action" type="button" onClick={() => onOpenInspector("activity")}>
           <span title={progress.current?.content ?? runStatusLabel}>{progress.current?.content ?? runStatusLabel}</span>
           <small>{progress.total ? "open Activity progress" : `${permissionMode} · open Activity`}</small>
         </button>
@@ -137,14 +137,14 @@ export function StructuredCards({
         {skills.length ? (
           <div className="card-list compact">
             {skills.slice(0, 3).map((skill) => (
-              <button className="card-row" type="button" key={skill} onClick={() => onOpenInspector("trace")}>
+              <button className="card-row" type="button" key={skill} onClick={() => onOpenInspector("activity")}>
                 <span className="card-row-title">{skill}</span>
                 <span>Observed in activity</span>
               </button>
             ))}
           </div>
         ) : (
-          <button className="card-body-action muted" type="button" onClick={() => onOpenInspector("trace")}>
+          <button className="card-body-action muted" type="button" onClick={() => onOpenInspector("activity")}>
             <span>No skill usage detected</span>
             <small>Requires activity evidence</small>
           </button>
@@ -157,6 +157,9 @@ export function StructuredCards({
 function referencedFileSummaries(messages: ChatMessage[], composerReferences: FileReference[], files: UiFileSummary[]) {
   const byPath = new Map(files.map((file) => [file.path, file]))
   const paths = new Set<string>()
+  for (const file of files) {
+    if (file.path.startsWith("uploads/")) paths.add(file.path)
+  }
   for (const reference of composerReferences) paths.add(reference.path)
   for (const message of messages) {
     for (const path of pathsFromMessage(message.text)) paths.add(path)

@@ -202,6 +202,119 @@ describe("ui server", () => {
     }
   })
 
+  test("manages projects and session lifecycle through the UI API", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-projects-"))
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const projects = await json(await ui.fetch("http://127.0.0.1/api/projects", {
+        headers: { authorization: "Bearer test-token" },
+      }))
+
+      expect(projects.status).not.toBe(500)
+      expect(projects.data.projects).toContainEqual(expect.objectContaining({
+        id: "project_default",
+        name: expect.any(String),
+        rootPath: root,
+        sessionCount: 0,
+      }))
+
+      const createdProject = await json(await ui.fetch("http://127.0.0.1/api/projects", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ name: "Research" }),
+      }))
+      const projectId = createdProject.data.project.id
+      const renamedProject = await json(await ui.fetch(`http://127.0.0.1/api/projects/${projectId}`, {
+        method: "PATCH",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ name: "Research Lab" }),
+      }))
+      const selectedProject = await json(await ui.fetch(`http://127.0.0.1/api/projects/${projectId}/select`, {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: "{}",
+      }))
+      const createdSession = await json(await ui.fetch("http://127.0.0.1/api/sessions", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ title: "Lifecycle chat", projectId }),
+      }))
+      const sessionId = createdSession.data.session.id
+      const nonEmptyDelete = await json(await ui.fetch(`http://127.0.0.1/api/projects/${projectId}`, {
+        method: "DELETE",
+        headers: { authorization: "Bearer test-token" },
+      }))
+      const renamedSession = await json(await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}`, {
+        method: "PATCH",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ title: "Renamed chat" }),
+      }))
+      const moved = await json(await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}/move`, {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ projectId: "project_default" }),
+      }))
+      const deletedProject = await json(await ui.fetch(`http://127.0.0.1/api/projects/${projectId}`, {
+        method: "DELETE",
+        headers: { authorization: "Bearer test-token" },
+      }))
+      const deletedSession = await json(await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}`, {
+        method: "DELETE",
+        headers: { authorization: "Bearer test-token" },
+      }))
+      const sessionsAfterDelete = await json(await ui.fetch("http://127.0.0.1/api/sessions", {
+        headers: { authorization: "Bearer test-token" },
+      }))
+
+      expect(createdProject.data.project).toMatchObject({ name: "Research", sessionCount: 0 })
+      expect(renamedProject.data.project).toMatchObject({ name: "Research Lab" })
+      expect(selectedProject.data.project.id).toBe(projectId)
+      expect(createdSession.data.session).toMatchObject({ title: "Lifecycle chat", projectId })
+      expect(nonEmptyDelete).toMatchObject({ ok: false, code: "PROJECT_NOT_EMPTY" })
+      expect(renamedSession.data.session).toMatchObject({ title: "Renamed chat", titleSource: "user" })
+      expect(moved.data.session).toMatchObject({ projectId: "project_default" })
+      expect(deletedProject.data.project.id).toBe(projectId)
+      expect(deletedSession.data.session.id).toBe(sessionId)
+      expect(sessionsAfterDelete.data.sessions.some((session: any) => session.id === sessionId)).toBe(false)
+    } finally {
+      await ui.close()
+    }
+  })
+
+  test("assigns legacy sessions without projectId to the default project", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-legacy-project-"))
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const runtime = await import("../../src/runtime/build")
+      const built = await runtime.buildRuntime({ cwd: root, loadLLM: false })
+      try {
+        await built.sessions.create({
+          id: "session_legacy",
+          cwd: join(root, "workspace/session_legacy"),
+          title: "Legacy chat",
+          metadata: { workspaceDir: "workspace/session_legacy" },
+        })
+      } finally {
+        await built.close()
+      }
+
+      const sessions = await json(await ui.fetch("http://127.0.0.1/api/sessions", {
+        headers: { authorization: "Bearer test-token" },
+      }))
+      const projects = await json(await ui.fetch("http://127.0.0.1/api/projects", {
+        headers: { authorization: "Bearer test-token" },
+      }))
+
+      expect(sessions.data.sessions[0]).toMatchObject({ id: "session_legacy", projectId: "project_default" })
+      expect(projects.data.projects.find((project: any) => project.id === "project_default")).toMatchObject({
+        sessionCount: 1,
+        lastSessionId: "session_legacy",
+      })
+    } finally {
+      await ui.close()
+    }
+  })
+
   test("saves provider config from the UI API", async () => {
     const root = await mkdtemp(join(tmpdir(), "pixiu-ui-save-config-"))
     const ui = await createUiServer({ cwd: root, token: "test-token" })

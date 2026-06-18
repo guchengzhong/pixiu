@@ -8,6 +8,7 @@ import { SemanticActivityList } from "./SemanticActivityList"
 import { StatusPanel } from "./StatusPanel"
 import { TodoProgress } from "./TodoProgress"
 import { WorkspaceFiles } from "./WorkspaceFiles"
+import { ApiPanel } from "./ApiPanel"
 
 export function ActivityPanel(props: {
   open: boolean
@@ -29,18 +30,18 @@ export function ActivityPanel(props: {
   return (
     <aside className={`workspace-panel workbench-inspector ${props.open ? "open" : ""} ${props.collapsed ? "inspector-collapsed-panel" : ""}`}>
       <div className="inspect-head">
-        <strong>Activity</strong>
+        <strong>Inspector</strong>
         <button className="icon-button inspector-toggle inspector-close" type="button" title="Close inspector" onClick={props.close}>x</button>
       </div>
       <div className="tabs">
-        {(["trace", "files", "evidence", "status"] as const).map((tab) => (
+        {(["activity", "files", "evidence", "status", "api"] as const).map((tab) => (
           <button className={`tab ${props.activeTab === tab ? "active" : ""}`} type="button" key={tab} onClick={() => props.setActiveTab(tab)}>
             {tab}
           </button>
         ))}
       </div>
       <div className="panel-body">
-        {props.activeTab === "trace" ? (
+        {props.activeTab === "activity" ? (
           <div className="activity-tab">
             <TodoProgress todos={props.todos} currentTodoId={props.currentTodoId} />
             {props.activity.length ? (
@@ -67,6 +68,7 @@ export function ActivityPanel(props: {
         ) : null}
         {props.activeTab === "evidence" ? <EvidencePanel evidence={props.evidence} /> : null}
         {props.activeTab === "status" ? <StatusPanel status={props.status} /> : null}
+        {props.activeTab === "api" ? <ApiPanel status={props.status} /> : null}
       </div>
     </aside>
   )

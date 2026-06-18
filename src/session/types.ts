@@ -3,6 +3,14 @@ import type { TodoItem } from "../todo/types"
 
 export type MessageRole = "system" | "user" | "assistant" | "tool"
 
+export type ProjectRecord = {
+  id: string
+  name: string
+  rootPath: string
+  createdAt: string
+  updatedAt: string
+}
+
 export type MessagePart =
   | { type: "text"; text: string }
   | { type: "reasoning"; text: string }

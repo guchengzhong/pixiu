@@ -5,7 +5,17 @@ import type { AgentEvent } from "../../agent/events"
 import { limitActivityItems } from "../../activity/format"
 import type { SessionEvidence } from "../../session/evidence"
 import type { TodoItem } from "../../todo/types"
-import type { ActivityUpdatedEvent, RunStatusEvent, UiFileSummary, UiProviderSummary, UiRunResult, UiSessionSummary } from "../shared/api"
+import type {
+  ActivityUpdatedEvent,
+  RunStatusEvent,
+  UiFileSummary,
+  UiMcpServerSummary,
+  UiProjectSummary,
+  UiProviderSummary,
+  UiRunResult,
+  UiSessionSummary,
+  UiSkillSummary,
+} from "../shared/api"
 import { isActiveRunStatus, isTerminalRunStatus, normalizePersistedRunStatus, normalizeRunStatus, runStatusLabel, type RunStatus } from "../../run/status"
 import { createUiApiClient, resolveUiToken, type ProviderConfigPayload } from "./api"
 import { AppSidebar } from "./components/AppSidebar"
@@ -14,6 +24,7 @@ import { ConfigModal } from "./components/ConfigModal"
 import { PermissionModal } from "./components/PermissionModal"
 import { RightInspector } from "./components/RightInspector"
 import { TopBar } from "./components/TopBar"
+import { WorkbenchPanelView } from "./components/WorkbenchPanelView"
 import { WorkbenchLayout } from "./components/WorkbenchLayout"
 import { ENDPOINTS } from "./constants"
 import {
@@ -29,7 +40,7 @@ import {
   traceFromMessages,
 } from "./helpers"
 import { currentTodoIdFromTodos, normalizeTodos, todoUpdateMatchesSession } from "./todos"
-import type { ActivityItem, ChatMessage, FilePreview, FileReference, FileReferenceSource, InspectorTab, PermissionView, StatusSummary, TraceItem } from "./types"
+import type { ActivityItem, ChatMessage, FilePreview, FileReference, FileReferenceSource, InspectorTab, PermissionView, StatusSummary, TraceItem, WorkbenchPanel } from "./types"
 import "./styles.css"
 
 declare global {
@@ -42,9 +53,14 @@ function App() {
   const token = resolveUiToken(window.__PIXIU_UI_TOKEN__)
   const api = useMemo(() => createUiApiClient(token ?? ""), [token])
   const [provider, setProvider] = useState<UiProviderSummary>()
+  const [projects, setProjects] = useState<UiProjectSummary[]>([])
+  const [currentProjectId, setCurrentProjectId] = useState<string>()
   const [sessions, setSessions] = useState<UiSessionSummary[]>([])
   const [sessionsLoading, setSessionsLoading] = useState(false)
   const [sessionsError, setSessionsError] = useState<string>()
+  const [skills, setSkills] = useState<UiSkillSummary[]>([])
+  const [mcpServers, setMcpServers] = useState<UiMcpServerSummary[]>([])
+  const [workbenchPanel, setWorkbenchPanel] = useState<WorkbenchPanel>("chat")
   const [sessionId, setSessionId] = useState<string>()
   const [chatTitle, setChatTitle] = useState("New chat")
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -64,7 +80,7 @@ function App() {
   const [panelOpen, setPanelOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [inspectorCollapsed, setInspectorCollapsed] = useState(false)
-  const [activeTab, setActiveTab] = useState<InspectorTab>("trace")
+  const [activeTab, setActiveTab] = useState<InspectorTab>("activity")
   const [configOpen, setConfigOpen] = useState(false)
   const [configNotice, setConfigNotice] = useState<{ text: string; kind?: "ok" | "error" }>({
     text: "Use env var mode to keep secrets out of pixiu.jsonc, or save a local key for quick setup. Responses redact secrets.",
@@ -128,6 +144,7 @@ function App() {
       setConfigOpen(true)
     }
     await loadSessions()
+    await loadWorkbenchData()
   }
 
   async function loadSessions() {
@@ -135,7 +152,7 @@ function App() {
     setSessionsError(undefined)
     try {
       const data = await api.listSessions()
-      setSessions(data.sessions.slice(0, 18))
+      setSessions(data.sessions)
     } catch (error) {
       setSessionsError(errorMessage(error))
     } finally {
@@ -143,10 +160,24 @@ function App() {
     }
   }
 
+  async function loadWorkbenchData() {
+    const [projectData, skillData, mcpData] = await Promise.all([
+      api.listProjects(),
+      api.listSkills().catch(() => ({ skills: [] as UiSkillSummary[] })),
+      api.listMcp().catch(() => ({ servers: [] as UiMcpServerSummary[] })),
+    ])
+    setProjects(projectData.projects)
+    setCurrentProjectId(projectData.currentProjectId)
+    setSkills(skillData.skills)
+    setMcpServers(mcpData.servers)
+  }
+
   async function loadSession(id: string) {
     const data = await api.getSession(id)
+    setWorkbenchPanel("chat")
     setSessionId(data.session.id)
     sessionIdRef.current = data.session.id
+    if (data.session.projectId) setCurrentProjectId(data.session.projectId)
     setChatTitle(data.session.title ?? "Chat")
     setMessages(sessionMessages(data.messages))
     setTrace(traceFromMessages(data.messages))
@@ -162,7 +193,7 @@ function App() {
   }
 
   async function createSession(title = "New chat") {
-    const data = await api.createSession({ title })
+    const data = await api.createSession({ title, ...(currentProjectId ? { projectId: currentProjectId } : {}) })
     setSessionId(data.session.id)
     sessionIdRef.current = data.session.id
     setChatTitle(data.session.title ?? "New chat")
@@ -177,7 +208,102 @@ function App() {
     setComposerReferences([])
     setUploadError(undefined)
     await loadSessions()
+    await loadWorkbenchData()
+    setWorkbenchPanel("chat")
     return data.session.id
+  }
+
+  async function createProject(input: { name: string; rootPath?: string }) {
+    const name = input.name.trim()
+    if (!name) return
+    try {
+      const rootPath = input.rootPath?.trim()
+      const data = await api.createProject({ name, ...(rootPath ? { rootPath } : {}) })
+      setCurrentProjectId(data.project.id)
+      await loadWorkbenchData()
+      await loadSessions()
+      setWorkbenchPanel("projects")
+    } catch (error) {
+      setSessionsError(errorMessage(error))
+    }
+  }
+
+  async function renameProject(projectId: string, nameInput: string) {
+    const name = nameInput.trim()
+    if (!name) return
+    try {
+      await api.updateProject(projectId, { name })
+      await loadWorkbenchData()
+    } catch (error) {
+      setSessionsError(errorMessage(error))
+    }
+  }
+
+  async function removeProjectEntry(projectId: string) {
+    try {
+      await api.removeProjectEntry(projectId)
+      await loadWorkbenchData()
+      await loadSessions()
+    } catch (error) {
+      setSessionsError(errorMessage(error))
+    }
+  }
+
+  async function selectProject(projectId: string) {
+    try {
+      await api.selectProject(projectId)
+      setCurrentProjectId(projectId)
+      setWorkbenchPanel("projects")
+      await loadWorkbenchData()
+    } catch (error) {
+      setSessionsError(errorMessage(error))
+    }
+  }
+
+  async function renameSession(id: string, titleInput: string) {
+    const title = titleInput.trim()
+    if (!title) return
+    try {
+      const data = await api.updateSession(id, { title })
+      setSessions((current) => current.map((item) => item.id === id ? data.session : item))
+      if (sessionId === id) setChatTitle(data.session.title ?? title)
+      await loadWorkbenchData()
+    } catch (error) {
+      setSessionsError(errorMessage(error))
+    }
+  }
+
+  async function moveSession(id: string, projectId: string) {
+    if (!projectId) return
+    try {
+      const data = await api.moveSession(id, { projectId })
+      setSessions((current) => current.map((item) => item.id === id ? data.session : item))
+      await loadWorkbenchData()
+    } catch (error) {
+      setSessionsError(errorMessage(error))
+    }
+  }
+
+  async function removeSessionFromList(id: string) {
+    try {
+      await api.removeSessionFromList(id)
+      if (sessionId === id) {
+        setSessionId(undefined)
+        sessionIdRef.current = undefined
+        setChatTitle("New chat")
+        setMessages([])
+        setTrace([])
+        setActivity([])
+        setEvidence(undefined)
+        setFiles([])
+        setTodoState([])
+        setRunStatus("idle")
+      }
+      await loadSessions()
+      await loadWorkbenchData()
+    } catch (error) {
+      setSessionsError(errorMessage(error))
+    }
   }
 
   async function ensureSession(title?: string) {
@@ -279,13 +405,14 @@ function App() {
       setConfigOpen(true)
       return
     }
-    setPrompt("")
-    setComposerReferences([])
-    setUploadError(undefined)
-    setMessages((current) => [...current, { role: "user", text: message }, { role: "assistant", text: "Thinking...", pending: true }])
-    setRunStatus("queued")
     try {
-      const started = await api.startRun({ message, ...(sessionId ? { sessionId } : {}), permissionMode })
+      const id = sessionId ?? await createSession(message.slice(0, 60) || "New chat")
+      setPrompt("")
+      setComposerReferences([])
+      setUploadError(undefined)
+      setMessages((current) => [...current, { role: "user", text: message }, { role: "assistant", text: "Thinking...", pending: true }])
+      setRunStatus("queued")
+      const started = await api.startRun({ message, sessionId: id, permissionMode })
       setRunId(started.runId)
       setRunStatus(normalizeRunStatus(started.status) ?? "queued")
       await subscribeRun(started.runId)
@@ -322,7 +449,7 @@ function App() {
       source.addEventListener("activity_updated", (event) => {
         const data = JSON.parse(event.data) as ActivityUpdatedEvent
         setActivity((current) => mergeActivityItems(current, data.activity))
-        setActiveTab("trace")
+        setActiveTab("activity")
         setPanelOpen(true)
       })
       source.addEventListener("agent_event", (event) => {
@@ -348,6 +475,7 @@ function App() {
           sessionIdRef.current = result.sessionId
           void api.getSession(result.sessionId).then((detail) => {
             setChatTitle(detail.session.title ?? "Chat")
+            if (detail.session.projectId) setCurrentProjectId(detail.session.projectId)
             setEvidence(detail.evidence)
             setFiles(detail.files)
             setTodoState(detail.todos)
@@ -392,7 +520,7 @@ function App() {
     if (event.type === "assistant_progress_delta") pushTrace({ title: "progress", detail: event.text, kind: "thinking" })
     if (event.type === "tool_call") {
       pushTrace({ title: `tool ${event.name}`, detail: JSON.stringify(event.input, null, 2), kind: "call" })
-      setActiveTab("trace")
+      setActiveTab("activity")
       setPanelOpen(true)
     }
     if (event.type === "tool_result") pushTrace({ title: `${event.ok ? "ok" : "failed"} ${event.name}`, detail: event.content, kind: "result", failed: !event.ok })
@@ -513,6 +641,10 @@ function App() {
       sidebar={
         <AppSidebar
           sessions={sessions}
+          projects={projects}
+          currentProjectId={currentProjectId}
+          skillCount={skills.length}
+          activePanel={workbenchPanel}
           sessionId={sessionId}
           providerReady={providerReady}
           workspace={statusSummary.workspace}
@@ -522,6 +654,14 @@ function App() {
           collapsed={sidebarCollapsed}
           onToggleCollapsed={() => setSidebarCollapsed((collapsed) => !collapsed)}
           onNewChat={() => void createSession("New chat")}
+          onOpenPanel={setWorkbenchPanel}
+          onSelectProject={(id) => void selectProject(id)}
+          onCreateProject={(input) => void createProject(input)}
+          onRenameProject={(id, name) => void renameProject(id, name)}
+          onRemoveProjectEntry={(id) => void removeProjectEntry(id)}
+          onRenameSession={(id, title) => void renameSession(id, title)}
+          onRemoveSessionFromList={(id) => void removeSessionFromList(id)}
+          onMoveSession={(id, projectId) => void moveSession(id, projectId)}
           onConfigureApi={() => setConfigOpen(true)}
           onLoadSession={(id) => void loadSession(id)}
         />
@@ -529,7 +669,7 @@ function App() {
       topBar={
         <TopBar
           chatTitle={chatTitle}
-          cwd={statusSummary.cwd}
+          cwd={projects.find((project) => project.id === currentProjectId)?.rootPath ?? statusSummary.cwd}
           model={provider?.model}
           permissionMode={permissionMode}
           runStatus={runStatus}
@@ -537,10 +677,15 @@ function App() {
           providerReady={providerReady}
           todos={todos}
           currentTodoId={currentTodoId}
-          inspectorCollapsed={inspectorCollapsed}
-          onOpenStatus={() => openInspector("status")}
-          onOpenActivity={() => openInspector("trace")}
-          onConfigureApi={() => setConfigOpen(true)}
+          inspectorOpen={panelOpen && !inspectorCollapsed}
+          onToggleInspector={() => {
+            if (panelOpen && !inspectorCollapsed) {
+              setPanelOpen(false)
+              setInspectorCollapsed(true)
+            } else {
+              openInspector(activeTab)
+            }
+          }}
         />
       }
       configModal={
@@ -558,33 +703,62 @@ function App() {
       }
       permissionModal={<PermissionModal permission={permission} answer={(action, scope) => void answerPermission(action, scope)} />}
     >
-      <ChatPane
-        messages={messages}
-        messageEndRef={messageEndRef}
-        setPrompt={setPrompt}
-        prompt={prompt}
-        sendPrompt={sendPrompt}
-        fileInputRef={fileInputRef}
-        uploadFiles={uploadFiles}
-        permissionMode={permissionMode}
-        setPermissionMode={setPermissionMode}
-        runStatus={runStatus}
-        runStatusLabel={runStatusLabel(runStatus)}
-        runId={runId}
-        cancelRun={cancelRun}
-        composerReferences={composerReferences}
-        uploadError={uploadError}
-        removeComposerReference={removeComposerReference}
-        previewReference={(reference) => void previewFile(reference.path, reference)}
-        files={files}
-        trace={trace}
-        activity={activity}
-        evidence={evidence}
-        todos={todos}
-        currentTodoId={currentTodoId}
-        openInspector={openInspector}
-        previewFile={(file) => void previewFile(file.path, file)}
-      />
+      {workbenchPanel === "chat" ? (
+        <ChatPane
+          messages={messages}
+          messageEndRef={messageEndRef}
+          setPrompt={setPrompt}
+          prompt={prompt}
+          sendPrompt={sendPrompt}
+          fileInputRef={fileInputRef}
+          uploadFiles={uploadFiles}
+          permissionMode={permissionMode}
+          setPermissionMode={setPermissionMode}
+          runStatus={runStatus}
+          runStatusLabel={runStatusLabel(runStatus)}
+          runId={runId}
+          cancelRun={cancelRun}
+          composerReferences={composerReferences}
+          uploadError={uploadError}
+          removeComposerReference={removeComposerReference}
+          previewReference={(reference) => void previewFile(reference.path, reference)}
+          files={files}
+          trace={trace}
+          activity={activity}
+          evidence={evidence}
+          todos={todos}
+          currentTodoId={currentTodoId}
+          openInspector={openInspector}
+          previewFile={(file) => void previewFile(file.path, file)}
+        />
+      ) : (
+        <WorkbenchPanelView
+          panel={workbenchPanel}
+          projects={projects}
+          currentProjectId={currentProjectId}
+          sessions={sessions}
+          skills={skills}
+          mcpServers={mcpServers}
+          files={files}
+          preview={preview}
+          evidence={evidence}
+          status={statusSummary}
+          providerReady={providerReady}
+          onCreateProject={(input) => void createProject(input)}
+          onRenameProject={(id, name) => void renameProject(id, name)}
+          onRemoveProjectEntry={(id) => void removeProjectEntry(id)}
+          onSelectProject={(id) => void selectProject(id)}
+          onCreateSession={() => void createSession("New chat")}
+          onLoadSession={(id) => void loadSession(id)}
+          onRenameSession={(id, title) => void renameSession(id, title)}
+          onRemoveSessionFromList={(id) => void removeSessionFromList(id)}
+          onMoveSession={(id, projectId) => void moveSession(id, projectId)}
+          onPreviewFile={(file) => void previewFile(file.path, file)}
+          onReferenceFile={referenceFile}
+          onConfigureApi={() => setConfigOpen(true)}
+          onRefresh={() => { void loadWorkbenchData(); void loadSessions(); void loadFiles() }}
+        />
+      )}
       <RightInspector
         open={panelOpen}
         collapsed={inspectorCollapsed}

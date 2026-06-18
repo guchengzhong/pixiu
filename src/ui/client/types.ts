@@ -1,4 +1,5 @@
 import type { ActivityItem, RunStatus } from "../shared/api"
+import type { UiMcpServerSummary, UiProjectSummary, UiSkillSummary } from "../shared/api"
 
 export type TraceItem = {
   id: string
@@ -45,7 +46,9 @@ export type PermissionView = {
   }
 }
 
-export type InspectorTab = "trace" | "files" | "evidence" | "status"
+export type InspectorTab = "activity" | "files" | "evidence" | "status" | "api"
+
+export type WorkbenchPanel = "chat" | "projects" | "skills" | "mcp" | "workspace" | "settings"
 
 export type StatusSummary = {
   cwd?: string
@@ -63,5 +66,17 @@ export type StatusSummary = {
   runStatusLabel?: string
 }
 
+export type ProjectListState = {
+  projects: UiProjectSummary[]
+  currentProjectId?: string
+}
+
+export type WorkbenchData = {
+  projects: ProjectListState
+  skills: UiSkillSummary[]
+  mcpServers: UiMcpServerSummary[]
+}
+
 export type { RunStatus } from "../shared/api"
 export type { ActivityItem } from "../shared/api"
+export type { UiMcpServerSummary, UiProjectSummary, UiSkillSummary } from "../shared/api"

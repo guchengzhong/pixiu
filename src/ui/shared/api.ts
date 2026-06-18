@@ -6,6 +6,8 @@ import type { AgentEvent } from "../../agent/events"
 import type { ActivityItem, ActivityUpdatedEvent } from "../../activity/types"
 import type { TodoItem } from "../../todo/types"
 import type { RunStatus, RunStatusEvent, TerminalRunStatus } from "../../run/status"
+import type { SkillSummary } from "../../skills/types"
+import type { MCPServerStatus } from "../../mcp/types"
 
 export type { RunStatus, RunStatusEvent, TerminalRunStatus } from "../../run/status"
 export type { ActivityItem, ActivityKind, ActivityMetadata, ActivitySource, ActivityStatus, ActivityUpdatedEvent } from "../../activity/types"
@@ -63,15 +65,30 @@ export type UiConfigResponse = {
   provider: UiProviderSummary
 }
 
+export type UiProjectSummary = {
+  id: string
+  name: string
+  rootPath: string
+  createdAt: string
+  updatedAt: string
+  sessionCount: number
+  lastSessionId?: string
+}
+
 export type UiSessionSummary = {
   id: string
+  projectId?: string
   cwd: string
   createdAt: string
   updatedAt: string
   title?: string
+  titleSource?: "auto" | "user"
   model?: string
   finishStatus?: TerminalRunStatus
   workspaceDir?: string
+  preview?: string
+  artifactCount?: number
+  activityCount?: number
   summaryApproxTokens: number
 }
 
@@ -89,6 +106,16 @@ export type UiSessionDetail = {
   files: UiFileSummary[]
   todos: TodoItem[]
   activity: ActivityItem[]
+}
+
+export type UiSkillSummary = SkillSummary & {
+  referenceCount: number
+}
+
+export type UiMcpServerSummary = MCPServerStatus & {
+  command?: string
+  url?: string
+  enabled: boolean
 }
 
 export type UiRunStatus = RunStatus

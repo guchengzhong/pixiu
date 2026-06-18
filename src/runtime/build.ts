@@ -8,6 +8,7 @@ import type { LLMClient } from "../llm/types"
 import type { SessionRecord } from "../session/types"
 import type { ToolContext } from "../tools/types"
 import { JsonlSessionStore } from "../session/jsonl"
+import { JsonProjectStore } from "../session/projects"
 import { ToolRegistry } from "../tools/registry"
 import { createBuiltinTools } from "../tools/builtin"
 import { createWebTools } from "../tools/web"
@@ -39,6 +40,7 @@ type RuntimeBase = {
   cwd: string
   config: PixiuConfig
   sessions: JsonlSessionStore
+  projects: JsonProjectStore
   tools: ToolRegistry
   skills: SkillLoader
   permissions: StaticPermissionManager
@@ -71,7 +73,9 @@ export async function buildRuntime(options: RuntimeOptions = {}): Promise<Runtim
     },
   )
   const pathGuard = new PathGuard({ workspaceRoot: cwd, workspaceOnly: config.sandbox.workspaceOnly })
-  const sessions = new JsonlSessionStore(join(cwd, ".pixiu/state/sessions"))
+  const stateDir = join(cwd, ".pixiu/state")
+  const sessions = new JsonlSessionStore(join(stateDir, "sessions"))
+  const projects = new JsonProjectStore(stateDir, cwd)
   // skills: create skillloader with config paths. 
   const skills = new SkillLoader(config.skills.paths.map((path) => (path.startsWith("~") ? path : join(cwd, path))))
   const tools = new ToolRegistry()
@@ -84,7 +88,7 @@ export async function buildRuntime(options: RuntimeOptions = {}): Promise<Runtim
     await Promise.all(mcpClients.map((client) => client.close?.().catch(() => undefined)))
   }
 
-  const base = { cwd, config, sessions, tools, skills, permissions, pathGuard, close }
+  const base = { cwd, config, sessions, projects, tools, skills, permissions, pathGuard, close }
   if (options.loadLLM === false) return base
 
   for (const [name, server] of Object.entries(config.mcp)) {

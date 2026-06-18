@@ -24,6 +24,35 @@ Current issues:
 
 This slice should focus on product hardening, not new agent intelligence.
 
+## Implementation Status
+
+Updated: 2026-06-18
+
+Completed in this pass:
+
+* [x] Added a persisted project store and default project migration path.
+* [x] Added project/session UI API endpoints for list, create, rename, remove, select, and move.
+* [x] Made session removal a soft-delete metadata operation.
+* [x] Guarded project removal so only empty Pixiu project entries can be removed.
+* [x] Kept project `rootPath` as a workspace reference only; removal never deletes project files or folders.
+* [x] Added project-aware sidebar navigation, session search, inline rename, move, and remove actions.
+* [x] Added Projects, Skills, MCP, Workspace, and Settings/API workbench panels.
+* [x] Simplified the top bar to one Inspector toggle and moved API/status details into inspector tabs.
+* [x] Added Activity / Files / Evidence / Status / API inspector tabs.
+* [x] Persisted uploaded file references and generated artifact metadata in session metadata.
+* [x] Preserved old sessions by assigning missing `projectId` values to the default project.
+* [x] Added server tests for project lifecycle, session lifecycle, move, soft removal, and legacy sessions.
+
+Deferred follow-ups:
+
+* [ ] Drag-and-drop session movement between projects. Move via select/menu is implemented first.
+* [ ] Dedicated API/UI for removing a persisted uploaded/reference file from a session without deleting the file.
+* [ ] Rich client component tests for the new sidebar and panel interactions.
+
+Terminology note:
+
+The HTTP API still uses standard `DELETE` methods, but the product copy and client-side code use remove semantics where possible. In this slice, removing a project means removing a Pixiu metadata entry, and removing a session means hiding it through metadata. Neither operation deletes a project source directory.
+
 ---
 
 ## Design Principles
@@ -291,7 +320,7 @@ Delete project only removes project metadata if it has no sessions.
 If project contains sessions, return an error message:
 
 ```text
-Project is not empty. Move or delete sessions first.
+Project is not empty. Move or remove sessions from this project first.
 ```
 
 Avoid accidentally deleting user files.

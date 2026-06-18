@@ -13,10 +13,8 @@ export function TopBar({
   providerReady,
   todos,
   currentTodoId,
-  inspectorCollapsed,
-  onOpenStatus,
-  onOpenActivity,
-  onConfigureApi,
+  inspectorOpen,
+  onToggleInspector,
 }: {
   chatTitle: string
   cwd: string | undefined
@@ -27,10 +25,8 @@ export function TopBar({
   providerReady: boolean
   todos: TodoItem[]
   currentTodoId: string | undefined
-  inspectorCollapsed: boolean
-  onOpenStatus(): void
-  onOpenActivity(): void
-  onConfigureApi(): void
+  inspectorOpen: boolean
+  onToggleInspector(): void
 }) {
   const projectName = pathBasename(cwd) || "Project"
   const progress = todoProgress(todos, currentTodoId)
@@ -59,10 +55,7 @@ export function TopBar({
         <span className={`pill ${providerReady ? "ok" : "warn"}`}>{providerReady ? "API ready" : "API key missing"}</span>
       </div>
       <div className="top-actions">
-        <button className="ghost" onClick={onOpenStatus}>Status</button>
-        <button className="ghost" onClick={onOpenActivity}>Activity</button>
-        {inspectorCollapsed ? <button className="ghost inspector-toggle" onClick={onOpenActivity}>Inspector</button> : null}
-        <button className="ghost" onClick={onConfigureApi}>API</button>
+        <button className={`ghost inspector-toggle ${inspectorOpen ? "active" : ""}`} onClick={onToggleInspector}>Inspector</button>
       </div>
     </header>
   )

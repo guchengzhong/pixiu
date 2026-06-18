@@ -3,10 +3,13 @@ import type {
   RunStatus,
   UiConfigResponse,
   UiFileSummary,
+  UiMcpServerSummary,
+  UiProjectSummary,
   UiProviderSummary,
   UiRunResult,
   UiSessionDetail,
   UiSessionSummary,
+  UiSkillSummary,
   UiStatus,
 } from "../shared/api"
 
@@ -15,12 +18,22 @@ export type UiApiClient = {
   config(): Promise<UiConfigResponse>
   saveProvider(input: ProviderConfigPayload): Promise<{ provider: UiProviderSummary }>
   testProvider(): Promise<{ ok: true; model: string; text: string }>
+  listProjects(): Promise<{ projects: UiProjectSummary[]; currentProjectId: string }>
+  createProject(input: { name?: string; rootPath?: string }): Promise<{ project: UiProjectSummary }>
+  updateProject(projectId: string, input: { name?: string; rootPath?: string }): Promise<{ project: UiProjectSummary }>
+  selectProject(projectId: string): Promise<{ project: UiProjectSummary }>
+  removeProjectEntry(projectId: string): Promise<{ project: UiProjectSummary }>
   listSessions(): Promise<{ sessions: UiSessionSummary[] }>
-  createSession(input: { title?: string }): Promise<{ session: UiSessionSummary; files: UiFileSummary[] }>
+  createSession(input: { title?: string; projectId?: string }): Promise<{ session: UiSessionSummary; files: UiFileSummary[] }>
   getSession(sessionId: string): Promise<UiSessionDetail>
+  updateSession(sessionId: string, input: { title: string }): Promise<{ session: UiSessionSummary }>
+  removeSessionFromList(sessionId: string): Promise<{ session: UiSessionSummary }>
+  moveSession(sessionId: string, input: { projectId: string }): Promise<{ session: UiSessionSummary }>
   listFiles(sessionId: string): Promise<{ files: UiFileSummary[] }>
   previewFile(sessionId: string, path: string): Promise<{ path: string; size: number; updatedAt: string; content: string }>
   uploadFiles(sessionId: string, files: FileList | File[]): Promise<{ files: UiFileSummary[] }>
+  listSkills(): Promise<{ skills: UiSkillSummary[] }>
+  listMcp(): Promise<{ servers: UiMcpServerSummary[] }>
   startRun(input: { message: string; sessionId?: string; permissionMode: string }): Promise<{ runId: string; status: RunStatus }>
   cancelRun(runId: string): Promise<{ runId: string; status: RunStatus }>
   answerPermission(id: string, input: { action: "allow" | "deny"; scope: "once" | "sessionSimilar" }): Promise<{ id: string; action: string }>
@@ -74,6 +87,27 @@ export function createUiApiClient(token: string, fetchImpl: UiFetch = fetch): Ui
         method: "POST",
         body: "{}",
       }),
+    listProjects: () => requestJson<{ projects: UiProjectSummary[]; currentProjectId: string }>("/api/projects"),
+    createProject: (input) =>
+      requestJson<{ project: UiProjectSummary }>("/api/projects", {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    updateProject: (projectId, input) =>
+      requestJson<{ project: UiProjectSummary }>(`/api/projects/${encodeURIComponent(projectId)}`, {
+        method: "PATCH",
+        body: JSON.stringify(input),
+      }),
+    selectProject: (projectId) =>
+      requestJson<{ project: UiProjectSummary }>(`/api/projects/${encodeURIComponent(projectId)}/select`, {
+        method: "POST",
+        body: "{}",
+      }),
+    removeProjectEntry: (projectId) =>
+      requestJson<{ project: UiProjectSummary }>(`/api/projects/${encodeURIComponent(projectId)}`, {
+        method: "DELETE",
+        body: "{}",
+      }),
     listSessions: () => requestJson<{ sessions: UiSessionSummary[] }>("/api/sessions"),
     createSession: (input) =>
       requestJson<{ session: UiSessionSummary; files: UiFileSummary[] }>("/api/sessions", {
@@ -81,6 +115,21 @@ export function createUiApiClient(token: string, fetchImpl: UiFetch = fetch): Ui
         body: JSON.stringify(input),
       }),
     getSession: (sessionId) => requestJson<UiSessionDetail>(`/api/sessions/${encodeURIComponent(sessionId)}`),
+    updateSession: (sessionId, input) =>
+      requestJson<{ session: UiSessionSummary }>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+        method: "PATCH",
+        body: JSON.stringify(input),
+      }),
+    removeSessionFromList: (sessionId) =>
+      requestJson<{ session: UiSessionSummary }>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+        method: "DELETE",
+        body: "{}",
+      }),
+    moveSession: (sessionId, input) =>
+      requestJson<{ session: UiSessionSummary }>(`/api/sessions/${encodeURIComponent(sessionId)}/move`, {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
     listFiles: (sessionId) => requestJson<{ files: UiFileSummary[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/files`),
     previewFile: (sessionId, path) =>
       requestJson<{ path: string; size: number; updatedAt: string; content: string }>(
@@ -98,6 +147,8 @@ export function createUiApiClient(token: string, fetchImpl: UiFetch = fetch): Ui
       if (!body.ok) throw new Error(body.message)
       return body.data
     },
+    listSkills: () => requestJson<{ skills: UiSkillSummary[] }>("/api/skills"),
+    listMcp: () => requestJson<{ servers: UiMcpServerSummary[] }>("/api/mcp"),
     startRun: (input) =>
       requestJson<{ runId: string; status: RunStatus }>("/api/runs", {
         method: "POST",

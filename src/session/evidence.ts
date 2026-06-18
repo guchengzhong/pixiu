@@ -2,7 +2,7 @@ import type { JsonObject, JsonValue } from "../shared/json"
 import type { SessionMessage } from "./types"
 
 export type SessionEvidence = {
-  artifacts: Array<{ tool: string; path: string; sessionId: string; messageId: string; createdAt: string }>
+  artifacts: Array<{ tool: string; path: string; sessionId: string; messageId: string; createdAt: string; exists?: boolean }>
   sources: Array<{ tool: string; sessionId: string; url?: string; query?: string; title?: string; accessedAt?: string; messageId: string }>
   shellCommands: Array<{ command: string; sessionId: string; exitCode?: number; messageId: string; createdAt: string }>
 }
