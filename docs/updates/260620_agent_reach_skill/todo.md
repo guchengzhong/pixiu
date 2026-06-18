@@ -215,13 +215,29 @@ That behavior is not aligned with the Pixiu adapter Skill. Agent Reach should pr
 
 This is optional and should happen only after the Skill-only path proves useful.
 
-- [ ] Consider `pixiu skill install-agent-reach` or similar convenience command.
-  - [ ] It should copy/sync the Pixiu adapter Skill.
-  - [ ] It should not run full `agent-reach install` automatically.
-  - [ ] It can print next-step commands for `agent-reach install --safe`, `doctor`, and optional channels.
-- [ ] Consider a script under `scripts/` for maintainers.
-  - [ ] It can sync references from `/home/gujing/code/Agent-Reach/agent_reach/skill/references`.
-  - [ ] It should keep `SKILL.md` as the Pixiu adapter, not blindly overwrite it with upstream.
+- [x] Consider `pixiu skill install-agent-reach` or similar convenience command.
+  - [x] It should copy/sync the Pixiu adapter Skill.
+  - [x] It should not run full `agent-reach install` automatically.
+  - [x] It can print next-step commands for managed install preview, full approved install, and `agent-reach doctor --json`.
+  - [x] Implemented as:
+
+```bash
+pixiu skill install-agent-reach
+pixiu skill install-agent-reach --yes
+pixiu skill install-agent-reach --json
+```
+
+- [x] Consider a script under `scripts/` for maintainers.
+  - [x] It can sync the Pixiu adapter from Pixiu's checked-in template into `.pixiu/skills/agent-reach`.
+  - [x] It should keep `SKILL.md` as the Pixiu adapter, not blindly overwrite it with upstream.
+  - [x] Implemented as:
+
+```bash
+bun run skills:agent-reach:sync
+bun run skills:agent-reach:check
+```
+
+  - [ ] A future upstream refresh helper may compare against `/home/gujing/code/Agent-Reach/agent_reach/skill/references`, but should still preserve the Pixiu adapter boundaries.
 - [ ] Consider docs in `README.md` or `docs/usage.md` only after the integration is stable.
 
 ## Suggested Implementation Order

@@ -13,6 +13,10 @@
     "smoke:help": "bun run src/cli/index.ts --help",
     "smoke:llm": "bun run scripts/smoke-llm.ts",
     "smoke:live": "bun run scripts/live-smoke.ts",
+    "skills:agent-reach:sync": "bun run scripts/sync-agent-reach-skill.ts",
+    "skills:agent-reach:check": "bun run scripts/sync-agent-reach-skill.ts --check",
+    "skills:browser-use:sync": "bun run scripts/sync-browser-use-skill.ts",
+    "skills:browser-use:check": "bun run scripts/sync-browser-use-skill.ts --check",
     "ui:build": "bun build src/ui/client/App.tsx --outdir src/ui/client/dist --target browser --format esm --minify --sourcemap=external",
     "typecheck": "tsc --noEmit",
     "test": "bun test"

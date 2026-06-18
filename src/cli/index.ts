@@ -14,6 +14,7 @@ import { defaultConfig, type PixiuConfig } from "../config/defaults"
 import { readJsoncFile } from "../shared/json"
 import { SkillHubProvider, installRemoteSkill, planSkillInstall } from "../skillhub/provider"
 import type { SkillInstallPlan, SkillInstallResult } from "../skillhub/types"
+import { AGENT_REACH_NEXT_STEPS, AGENT_REACH_SKILL_FILES, AGENT_REACH_TEMPLATE_VERSION } from "../skills/agent-reach-template"
 import { createMCPClient, inspectMCPServers } from "../mcp/status"
 import { mcpToolsToDefinitions } from "../mcp/tools"
 import { DEFAULT_UI_HOST, DEFAULT_UI_PORT, startUiServer } from "../ui/server/server"
@@ -106,6 +107,7 @@ Skills:
   pixiu skill path add <path> [--json]
   pixiu skill path remove <path> [--json]
   pixiu skill doctor [--json]
+  pixiu skill install-agent-reach [--yes] [--json]
   pixiu skill install <remote-skill-id> [--yes] [--json]
 
 MCP:
@@ -1898,7 +1900,15 @@ async function skillCommand(args: string[]): Promise<CliResult> {
     const result = await installRemoteSkill(detail, installRoot)
     return { exitCode: 0, output: json ? JSON.stringify({ installed: result }, null, 2) : formatSkillInstallResult(result) }
   }
-  throw new PixiuError("skill requires init, list, show, search, path, doctor, or install", { code: "CLI_USAGE" })
+  if (subcommand === "install-agent-reach") {
+    const result = await installAgentReachSkillAdapter({ cwd: runtime.cwd, yes: has(args, "--yes") })
+    if (json) return { exitCode: result.requiresConfirmation ? 1 : 0, output: JSON.stringify(result, null, 2) }
+    if (result.requiresConfirmation) {
+      return { exitCode: 1, output: `${formatAgentReachSkillPlan(result)}\nRe-run with --yes to install or sync the Pixiu adapter skill.` }
+    }
+    return { exitCode: 0, output: formatAgentReachSkillInstall(result) }
+  }
+  throw new PixiuError("skill requires init, list, show, search, path, doctor, install-agent-reach, or install", { code: "CLI_USAGE" })
 }
 
 async function skillPathCommand(subcommand: string | undefined, args: string[]): Promise<CliResult> {
@@ -1961,6 +1971,43 @@ async function initSkill(options: {
     "utf8",
   )
   return { name, description, skillsDir, targetDir, skillPath }
+}
+
+type AgentReachSkillInstallResult = {
+  name: "agent-reach"
+  version: string
+  targetDir: string
+  files: Array<{ path: string; bytes: number }>
+  nextSteps: string[]
+  requiresConfirmation: boolean
+}
+
+async function installAgentReachSkillAdapter(options: { cwd: string; yes: boolean }): Promise<AgentReachSkillInstallResult> {
+  const targetDir = resolve(options.cwd, ".pixiu/skills/agent-reach")
+  const files = AGENT_REACH_SKILL_FILES.map((file) => ({ path: file.path, bytes: Buffer.byteLength(file.content, "utf8") }))
+  if (!options.yes) {
+    return {
+      name: "agent-reach",
+      version: AGENT_REACH_TEMPLATE_VERSION,
+      targetDir,
+      files,
+      nextSteps: AGENT_REACH_NEXT_STEPS,
+      requiresConfirmation: true,
+    }
+  }
+  for (const file of AGENT_REACH_SKILL_FILES) {
+    const targetPath = join(targetDir, file.path)
+    await mkdir(dirname(targetPath), { recursive: true })
+    await writeFile(targetPath, file.content.endsWith("\n") ? file.content : `${file.content}\n`, "utf8")
+  }
+  return {
+    name: "agent-reach",
+    version: AGENT_REACH_TEMPLATE_VERSION,
+    targetDir,
+    files,
+    nextSteps: AGENT_REACH_NEXT_STEPS,
+    requiresConfirmation: false,
+  }
 }
 
 function safeSkillName(name: string) {
@@ -2161,6 +2208,30 @@ function formatSkillInstallResult(result: SkillInstallResult) {
     `manifest: ${result.manifestPath}`,
     "files:",
     ...result.files.map((file) => `- ${file.path} (${file.bytes} bytes, sha256 ${file.sha256})`),
+  ].join("\n")
+}
+
+function formatAgentReachSkillPlan(result: AgentReachSkillInstallResult) {
+  return [
+    "Install Pixiu Agent Reach adapter skill:",
+    `skill: ${result.name}`,
+    `version: ${result.version}`,
+    `target: ${result.targetDir}`,
+    "files:",
+    ...result.files.map((file) => `- ${file.path} (${file.bytes} bytes)`),
+    "",
+    "This installs only the Pixiu Skill adapter. It does not install Agent Reach, Python packages, browser tooling, cookies, or optional platform channels.",
+  ].join("\n")
+}
+
+function formatAgentReachSkillInstall(result: AgentReachSkillInstallResult) {
+  return [
+    `installed Pixiu Agent Reach adapter skill to ${result.targetDir}`,
+    "files:",
+    ...result.files.map((file) => `- ${file.path} (${file.bytes} bytes)`),
+    "",
+    "Next steps:",
+    ...result.nextSteps.map((step) => `- ${step}`),
   ].join("\n")
 }
 

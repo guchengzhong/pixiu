@@ -13,14 +13,15 @@ This slice should improve task observability without building a full plan-agent 
 
 ## Current State
 
-> Status note: Slices 1-6 are implemented and checked below. Slice 7 run status events and Slice 8 tool-authored `metadata.activity` are still pending.
+> Status note (2026-06-18): Slices 1-7 are implemented. Slices 8-9 were completed through the later `260617_tools_use` Slice 8 alignment. The early dotted activity kind proposal was intentionally replaced by the current shared coarse `ActivityKind` model plus optional `details.operation` metadata.
 
-- `src/agent/events.ts` exposes `assistant_progress_delta`, `tool_call`, `tool_result`, `message`, `error`, and `finish`, but no structured todo/progress event.
-- `src/agent/runner.ts` treats all tool results the same. It does not promote todo output into session state.
-- `src/tools/builtin.ts` has a `todo({ items: string[] })` tool that only echoes a compact list.
-- `src/cli/trace.ts` renders progress notes and tool calls, but it has no durable task view.
-- Web UI trace rendering in `src/ui/client/App.tsx` and `src/ui/client/components/TraceList.tsx` also treats progress and tool activity as plain trace entries.
-- Session persistence stores messages, but there is no first-class todo list attached to a session.
+- `src/agent/events.ts` exposes `todo_updated` in addition to assistant progress, tool, message, error, and finish events.
+- `src/agent/runner.ts` promotes successful `todowrite` and legacy `todo` metadata into session todo state.
+- `src/tools/builtin.ts` includes structured `todowrite`, keeps the legacy `todo` path, and emits `metadata.activity` for built-in operations.
+- `src/run/status.ts` defines the current run status model: `queued | running | waiting_for_permission | idle | error | cancelled`.
+- `src/activity/types.ts` and `src/activity/format.ts` define shared semantic activity types and formatting for CLI and Web UI.
+- `src/cli/trace.ts` renders todo snapshots and semantic CodeBuddy-style tool activity while keeping raw details available in verbose output.
+- Web UI state uses live `todo_updated`, `run_status`, and `activity_updated` events and restores persisted todos/activity from session detail.
 
 ## References
 
@@ -69,11 +70,9 @@ This slice should improve task observability without building a full plan-agent 
   - [x] Save normalized todos as session state.
   - [x] Emit `todo_updated` immediately after the tool result.
   - [x] Continue emitting the normal `tool_result` for trace continuity.
-- [ ] Consider a lightweight run status event only if it is needed by UI.
-  - [ ] `run_started`
-  - [ ] `run_idle`
-  - [ ] `run_error`
-  - [ ] Keep this separate from todo state.
+- [x] Consider a lightweight run status event only if it is needed by UI.
+  - [x] Implemented later as `run_status` SSE events with `queued`, `running`, `waiting_for_permission`, `idle`, `error`, and `cancelled`.
+  - [x] Keep this separate from todo state.
 - [x] Add tests proving event order.
   - [x] `tool_call` for `todowrite`
   - [x] `tool_result`
@@ -161,125 +160,124 @@ This slice should improve task observability without building a full plan-agent 
 
 Do this only after todo state is working and the UI proves it needs more lifecycle data.
 
-- [ ] Add run/session status events.
-  - [ ] `busy`
-  - [ ] `idle`
-  - [ ] `waiting_for_permission`
-  - [ ] `error`
-- [ ] Surface status in CLI and Web UI.
-  - [ ] Current run busy/idle indicator.
-  - [ ] Permission waiting state.
-  - [ ] Retry/error state if provider failures are retried later.
-- [ ] Keep status separate from todo state.
-  - [ ] Todo says what work is being done.
-  - [ ] Status says whether the run loop is active or blocked.
+- [x] Add run/session status events.
+  - [x] Current statuses are `queued`, `running`, `waiting_for_permission`, `idle`, `error`, and `cancelled`.
+  - [x] Keep legacy `run` SSE compatibility values such as `waiting_permission` and `done`.
+  - [x] Keep terminal persisted status normalized to `idle`, `error`, or `cancelled`.
+- [x] Surface status in CLI and Web UI.
+  - [x] Web UI consumes `run_status` SSE events.
+  - [x] Web UI shows current run status labels in the top bar, composer, status panel, and structured cards.
+  - [x] CLI chat has local run progress/status while the runner is active.
+  - [x] Permission waiting state is surfaced as `waiting_for_permission`.
+  - [x] Provider failures and cancellations surface as terminal `error` / `cancelled` status.
+- [x] Keep status separate from todo state.
+  - [x] Todo says what work is being done.
+  - [x] Status says whether the run loop is active or blocked.
+  - [x] Activity timeline does not use run lifecycle statuses as semantic activity.
 
 ## Slice 8: Activity Metadata Contract
 
 Move the Web UI Activity timeline from frontend guessing to tool-authored activity metadata. The current semantic timeline is useful as a deterministic fallback, but it still parses strings such as `Changed xxx.md` and shell commands. The more stable design is metadata-first: tools describe what they did at execution time, and the UI renders that directly.
 
+Status: implemented through `260617_tools_use` Slice 8. The implementation reuses the shared activity model instead of the early dotted enum sketch below. Public `kind` values are coarse categories such as `file`, `shell`, `search`, `skill`, `artifact`, and `system`; finer operations can live in `details.operation`.
+
 ### Goals
 
-- [ ] Add a shared `ActivityMetadata` type outside the UI directory.
-  - [ ] Suggested shape:
-    - [ ] `kind: "file.read" | "file.write" | "file.edit" | "shell.command" | "web.search" | "web.fetch" | "skill.load" | "todo.update" | "artifact.create" | "unknown"`
-    - [ ] `title: string`
-    - [ ] `target?: string`
-    - [ ] `summary?: string`
-    - [ ] `status?: "running" | "success" | "failed" | "blocked"`
-    - [ ] `detail?: string`
-- [ ] Allow tool results to include `metadata.activity?: ActivityMetadata`.
-  - [ ] Keep existing `metadata` fields intact.
-  - [ ] Do not remove raw `content`.
-  - [ ] Do not require a new backend route or a new run API.
-- [ ] Update built-in tools to emit activity metadata.
-  - [ ] `read`: `kind=file.read`, `title=Read file`, `target=path`.
-  - [ ] `write`: `kind=file.write`, `title=Updated file` or `Wrote file`, `target=path`.
-  - [ ] `edit` / `patch`: `kind=file.edit`, `title=Updated file`, `target=path`.
-  - [ ] `web_search`: `kind=web.search`, `title=Searched web`, `target=query`.
-  - [ ] `web_fetch`: `kind=web.fetch`, `title=Fetched page`, `target=url`.
-  - [ ] `skill`: `kind=skill.load`, `title=Loaded skill`, `target=name`.
-  - [ ] `todowrite` / legacy `todo`: `kind=todo.update`, `title=Updated task plan`.
-  - [ ] Artifact-producing tools should set `kind=artifact.create` where the tool can identify the artifact.
-- [ ] Keep raw details fully auditable.
-  - [ ] Raw tool input JSON remains available.
-  - [ ] Raw tool result `content`, stdout/stderr, exit code, and metadata remain available.
-  - [ ] UI should show metadata activity by default but keep raw details collapsible.
+- [x] Add a shared `ActivityMetadata` type outside the UI directory.
+  - [x] Implemented in `src/activity/types.ts`.
+  - [x] Uses shared `ActivityKind` coarse values instead of dotted enum strings.
+  - [x] Supports `title`, `target`, `summary`, `status`, `command`, and `details`.
+- [x] Allow tool results to include `metadata.activity?: ActivityMetadata`.
+  - [x] Keep existing `metadata` fields intact.
+  - [x] Do not remove raw `content`.
+  - [x] Do not require a new backend route or a new run API.
+- [x] Update built-in tools to emit activity metadata.
+  - [x] `read`: `kind=file`, `title=Read file`, `target=path`.
+  - [x] `write`: `kind=file`, `title=Updated file` or `Wrote file`, `target=path`.
+  - [x] `edit` / `patch`: `kind=file`, `title=Updated file`, `target=path`.
+  - [x] `web_search`: `kind=search`, `title=Searched web`, `target=query`.
+  - [x] `web_fetch`: `kind=search`, `title=Fetched page`, `target=url`.
+  - [x] `skill`: `kind=skill`, `title=Loaded skill`, `target=name`.
+  - [x] `todowrite` / legacy `todo`: `kind=system`, `title=Updated task plan`.
+  - [x] Artifact-producing tools set `kind=artifact` where the tool can identify the artifact.
+- [x] Keep raw details fully auditable.
+  - [x] Raw tool input JSON remains available.
+  - [x] Raw tool result `content`, stdout/stderr, exit code, and metadata remain available.
+  - [x] UI shows semantic activity by default while keeping raw details available.
 
 ### Shell Purpose And Activity
 
 Shell is special because the command string alone is not always enough to know the user's intent.
 
-- [ ] Extend the shell tool input schema with optional `purpose?: string`.
-  - [ ] Example:
-    - [ ] `command: "wc -l .pixiu/tmp/paper_text.txt"`
-    - [ ] `purpose: "Count lines in the extracted paper text"`
-  - [ ] Treat `purpose` as agent-declared intent, not verified fact.
-  - [ ] Keep the raw command visible in Activity raw details.
-- [ ] Emit shell `metadata.activity`.
-  - [ ] Default:
-    - [ ] `kind=shell.command`
-    - [ ] `title=Command completed` / `Command failed`
-    - [ ] `target=command` or identified output path
-    - [ ] `status=success|failed`
-  - [ ] If `purpose` is present, use it as the primary human-readable title or summary.
-  - [ ] If the command has reliable deterministic metadata, set target:
-    - [ ] Redirect output path: `> output_path`
-    - [ ] Known command target path when safe to parse
-  - [ ] Do not claim business intent from command parsing unless it is obvious and deterministic.
+- [x] Extend the shell tool input schema with optional `purpose?: string`.
+  - Example:
+    - `command: "wc -l .pixiu/tmp/paper_text.txt"`
+    - `purpose: "Count lines in the extracted paper text"`
+  - [x] Treat `purpose` as agent-declared intent, not verified fact.
+  - [x] Keep the raw command visible in Activity raw details.
+- [x] Emit shell `metadata.activity`.
+  - [x] Default:
+    - [x] `kind=shell`
+    - [x] `title=Ran command` / `Command failed`, or the provided semantic purpose.
+    - [x] `command=command`
+    - [x] `status=success|error`
+  - [x] If `purpose` is present, use it as the primary human-readable title or summary.
+  - [x] Include deterministic metadata such as exit code, timeout, and duration in `details`.
+  - [x] Do not claim business intent from command parsing unless it is obvious and deterministic.
 
 ### UI Priority Order
 
 Update the Web UI timeline derivation to use this priority order:
 
-1. [ ] Prefer `tool_result.metadata.activity`.
-2. [ ] If unavailable, use `tool_call.input.purpose` or `tool_call.input.summary` when present.
-3. [ ] If unavailable, use the current deterministic frontend heuristic.
-4. [ ] Fallback to generic labels:
-   - [ ] `Command completed`
-   - [ ] `Command failed`
-   - [ ] `Running command`
-   - [ ] `Tool completed`
+1. [x] Prefer `tool_call.input._activity` when present, then update it with `tool_result.metadata.activity`.
+2. [x] If unavailable, use `tool_result.metadata.activity`.
+3. [x] If unavailable, use `tool_call.input.purpose` or deterministic semantic input when present.
+4. [x] If unavailable, use the current deterministic heuristic.
+5. [x] Fallback to generic labels:
+   - [x] `Ran command`
+   - [x] `Command failed`
+   - [x] `Running command`
+   - [x] `Used tool: <name>`
 
 The existing `deriveExecutionTimeline(trace)` heuristic should remain as a compatibility fallback for older sessions and tools that do not yet emit activity metadata.
 
 ### Frontend Trace Requirements
 
-- [ ] Preserve tool result metadata in the UI trace model.
-  - [ ] Current live UI trace mainly stores title/detail/kind/failed.
-  - [ ] Add frontend-internal trace fields if needed, such as `metadata?: JsonObject` or `raw?: unknown`.
-  - [ ] Do not change shared UI API types unless required for already-exposed session detail.
-- [ ] Preserve restored-session metadata.
-  - [ ] `traceFromMessages()` should extract `tool_result.result.metadata.activity` from persisted messages.
-  - [ ] Live SSE `tool_result` handling should preserve `event.metadata`.
-- [ ] Keep old sessions working.
-  - [ ] If metadata is missing, semantic timeline should still use deterministic heuristics.
+- [x] Preserve tool result metadata in the UI trace model.
+  - [x] Live raw trace still contains tool call input and tool result metadata.
+  - [x] Shared UI API exposes semantic activity items and raw trace details.
+  - [x] No new route was required for this.
+- [x] Preserve restored-session metadata.
+  - [x] Restored sessions recover persisted semantic activity.
+  - [x] Live SSE `tool_result` handling preserves `event.metadata`.
+- [x] Keep old sessions working.
+  - [x] If metadata is missing, semantic timeline still uses deterministic heuristics.
 
 ### Tests
 
-- [ ] Tool tests:
-  - [ ] `read` returns `metadata.activity.kind=file.read`.
-  - [ ] `write` returns `metadata.activity.kind=file.write` and target path.
-  - [ ] `edit` / `patch` return `metadata.activity.kind=file.edit`.
-  - [ ] `shell` returns `metadata.activity.kind=shell.command` with status.
-  - [ ] `shell` accepts optional `purpose` and includes it in activity summary/title.
-  - [ ] `web_search` / `web_fetch` activity metadata includes query/url.
-  - [ ] `todowrite` activity metadata is `todo.update`.
-- [ ] Runner/UI tests:
-  - [ ] `tool_result` AgentEvent continues to include metadata.
-  - [ ] Live Web UI trace preserves `metadata.activity`.
-  - [ ] Restored session trace preserves `metadata.activity`.
-  - [ ] Timeline uses metadata before heuristic.
-  - [ ] Missing metadata falls back to existing heuristic.
-  - [ ] Raw details remain expandable.
+- [x] Tool tests:
+  - [x] `read` returns `metadata.activity.kind=file`.
+  - [x] `write` returns `metadata.activity.kind=file` and target path.
+  - [x] `edit` / `patch` return `metadata.activity.kind=file`.
+  - [x] `shell` returns `metadata.activity.kind=shell` with status.
+  - [x] `shell` accepts optional `purpose` and includes it in activity summary/title.
+  - [x] `web_search` / `web_fetch` activity metadata includes query/url.
+  - [x] `todowrite` activity metadata is `kind=system` with todo/update semantics.
+- [x] Runner/UI tests:
+  - [x] `tool_result` AgentEvent continues to include metadata.
+  - [x] Live Web UI trace preserves `metadata.activity`.
+  - [x] Restored session trace preserves `metadata.activity`.
+  - [x] Timeline uses intent/metadata before heuristic.
+  - [x] Missing metadata falls back to existing heuristic.
+  - [x] Raw details remain expandable.
 
 ### Non-goals
 
-- [ ] No LLM-based activity summarization.
-- [ ] No new server route.
-- [ ] No run API or message schema redesign beyond existing metadata.
-- [ ] No hidden chain-of-thought display.
-- [ ] No removal of current deterministic frontend heuristics until old sessions are safely covered.
+- [x] No LLM-based activity summarization.
+- [x] No new server route.
+- [x] No run API or message schema redesign beyond existing metadata.
+- [x] No hidden chain-of-thought display.
+- [x] No removal of current deterministic frontend heuristics until old sessions are safely covered.
 
 ## Slice 9: CLI Semantic Trace Rendering
 
@@ -292,20 +290,22 @@ The Web UI Activity panel now has a metadata-first semantic activity path, but i
 
 That is useful for debugging, but it is not friendly as the default user-facing progress surface. The CLI should show a task-oriented activity stream by default while preserving raw commands under verbose/debug output.
 
+Status: implemented. `CliTraceRenderer` now uses the shared semantic activity formatter for CodeBuddy-style chat output while keeping compact trace output and raw verbose details available.
+
 ### Goals
 
-- [ ] Make CLI chat consume the same semantic activity model used by the Web UI.
-  - [ ] Reuse `activityFromToolIntent()`, `activityFromToolResult()`, and `updateActivityWithToolResult()` where practical.
-  - [ ] Avoid creating a separate CLI-only semantic model that diverges from UI behavior.
-  - [ ] Keep raw command and result content auditable.
-- [ ] Replace raw shell-first labels with intent-first labels in codebuddy-style chat output.
-  - [ ] Prefer user-facing titles such as `检查 Agent Reach 可用状态`.
-  - [ ] Avoid defaulting to `Bash(command)` when a semantic title is available.
-  - [ ] Avoid defaulting to `Completed bash command` / `Bash failed` when a semantic result title is available.
-- [ ] Preserve developer ergonomics.
-  - [ ] `--verbose` should show raw command details, stdout/stderr preview, exit code, and timing.
-  - [ ] JSON / stream-json output should remain raw and machine-readable.
-  - [ ] Compact non-chat trace output should remain readable and backward-compatible unless explicitly changed.
+- [x] Make CLI chat consume the same semantic activity model used by the Web UI.
+  - [x] Reuse `activityFromToolIntent()`, `activityFromToolResult()`, and `updateActivityWithToolResult()` where practical.
+  - [x] Avoid creating a separate CLI-only semantic model that diverges from UI behavior.
+  - [x] Keep raw command and result content auditable.
+- [x] Replace raw shell-first labels with intent-first labels in codebuddy-style chat output.
+  - [x] Prefer user-facing titles such as `检查 Agent Reach 可用状态`.
+  - [x] Avoid defaulting to `Bash(command)` when a semantic title is available.
+  - [x] Avoid defaulting to `Completed bash command` / `Bash failed` when a semantic result title is available.
+- [x] Preserve developer ergonomics.
+  - [x] `--verbose` shows raw command details, stdout/stderr preview, exit code, and timing.
+  - [x] JSON / stream-json output remains raw and machine-readable.
+  - [x] Compact non-chat trace output remains readable and backward-compatible unless explicitly changed.
 
 ### Shell Purpose
 
@@ -340,18 +340,18 @@ Instead of:
 
 Tasks:
 
-- [ ] Extend shell input schema with optional `purpose`.
-  - [ ] Treat `purpose` as model-declared intent, not verified fact.
-  - [ ] Preserve raw `command` in metadata and verbose output.
-  - [ ] Do not pass `purpose` to the shell process.
-- [ ] Include `purpose` in shell `metadata.activity`.
-  - [ ] Use it as `activity.title` or `activity.summary`.
-  - [ ] Keep `activity.command` as the raw command.
-  - [ ] Keep deterministic metadata such as `exitCode`, `timedOut`, and `durationMs`.
-- [ ] Update the system prompt examples.
-  - [ ] Show `purpose` for shell calls.
-  - [ ] Keep `_activity` supported for richer structured cases.
-  - [ ] Include an Agent Reach example:
+- [x] Extend shell input schema with optional `purpose`.
+  - [x] Treat `purpose` as model-declared intent, not verified fact.
+  - [x] Preserve raw `command` in metadata and verbose output.
+  - [x] Do not pass `purpose` to the shell process.
+- [x] Include `purpose` in shell `metadata.activity`.
+  - [x] Use it as `activity.title` or `activity.summary`.
+  - [x] Keep `activity.command` as the raw command.
+  - [x] Keep deterministic metadata such as `exitCode`, `timedOut`, and `durationMs`.
+- [x] Update the system prompt examples.
+  - [x] Show `purpose` for shell calls.
+  - [x] Keep `_activity` supported for richer structured cases.
+  - [x] Include an Agent Reach example:
 
 ```json
 {
@@ -408,51 +408,51 @@ Do not try to infer arbitrary business intent from shell commands. Add only obvi
 
 Suggested first recognizers:
 
-- [ ] `agent-reach doctor --json` -> `检查 Agent Reach 可用状态`
-- [ ] `agent-reach install --env=auto --safe` -> `预检 Agent Reach 安装`
-- [ ] `agent-reach install --env=auto --dry-run` -> `预览 Agent Reach 安装`
-- [ ] `agent-reach install ...` -> `安装 Agent Reach`
-- [ ] `agent-reach check-update` -> `检查 Agent Reach 更新`
-- [ ] `pipx install xhs-cli` / `pip3 install ... xhs-cli` -> `安装小红书命令行工具`
-- [ ] `python3 -m venv ...` -> `创建临时 Python 环境`
-- [ ] `which agent-reach` / `command -v agent-reach` -> `检查 Agent Reach 命令`
-- [ ] `which pipx` / `command -v pipx` -> `检查 pipx 命令`
-- [ ] `xhs hot` -> `获取小红书热门话题`
-- [ ] `xhs search ...` -> `搜索小红书内容`
-- [ ] `opencli xiaohongshu ...` -> `使用 OpenCLI 访问小红书`
-- [ ] `bili search ...` -> `搜索 Bilibili 视频`
-- [ ] `yt-dlp ...` -> `读取 YouTube 视频信息`
+- [x] `agent-reach doctor --json` -> `检查 Agent Reach 可用状态`
+- [x] `agent-reach install --env=auto --safe` -> `预检 Agent Reach 安装`
+- [x] `agent-reach install --env=auto --dry-run` -> `预览 Agent Reach 安装`
+- [x] `agent-reach install ...` -> `安装 Agent Reach`
+- [x] `agent-reach check-update` -> `检查 Agent Reach 更新`
+- [x] `pipx install xhs-cli` / `pip3 install ... xhs-cli` -> `安装小红书命令行工具`
+- [x] `python3 -m venv ...` -> `创建临时 Python 环境`
+- [x] `which agent-reach` / `command -v agent-reach` -> `检查 Agent Reach 命令`
+- [x] `which pipx` / `command -v pipx` -> `检查 pipx 命令`
+- [x] `xhs hot` -> `获取小红书热门话题`
+- [x] `xhs search ...` -> `搜索小红书内容`
+- [x] `opencli xiaohongshu ...` -> `使用 OpenCLI 访问小红书`
+- [x] `bili search ...` -> `搜索 Bilibili 视频`
+- [x] `yt-dlp ...` -> `读取 YouTube 视频信息`
 
 Fallback rules:
 
-- [ ] If the command is not confidently recognized, keep a generic semantic label such as `运行命令` rather than inventing an intent.
-- [ ] Keep the raw command available under verbose output.
-- [ ] Never hide failures. Friendly labels should still make errors clear.
+- [x] If the command is not confidently recognized, keep a generic semantic label such as `运行命令` rather than inventing an intent.
+- [x] Keep the raw command available under verbose output.
+- [x] Never hide failures. Friendly labels should still make errors clear.
 
 ### Tests
 
-- [ ] CLI trace tests:
-  - [ ] `shell` call with `purpose` renders the purpose instead of `Bash(command)`.
-  - [ ] `shell` result with `metadata.activity` renders semantic title/status.
-  - [ ] `agent-reach doctor --json` fallback renders `检查 Agent Reach 可用状态`.
-  - [ ] Failed `agent-reach doctor --json` with exit 127 renders an Agent Reach missing-style message, not only `Bash failed`.
-  - [ ] `--verbose` or verbose renderer still includes raw command details.
-  - [ ] Existing non-semantic tool traces remain readable.
-- [ ] Tool tests:
-  - [ ] Shell schema accepts `purpose`.
-  - [ ] Shell execution ignores `purpose` for process invocation.
-  - [ ] Shell result metadata includes both `command` and semantic `activity`.
-- [ ] Prompt tests:
-  - [ ] Shell examples mention `purpose`.
-  - [ ] `_activity` examples remain valid.
+- [x] CLI trace tests:
+  - [x] `shell` call with `purpose` renders the purpose instead of `Bash(command)`.
+  - [x] `shell` result with `metadata.activity` renders semantic title/status.
+  - [x] `agent-reach doctor --json` fallback renders `检查 Agent Reach 可用状态`.
+  - [x] Failed `agent-reach doctor --json` with exit 127 renders an Agent Reach missing-style message, not only `Bash failed`.
+  - [x] `--verbose` or verbose renderer still includes raw command details.
+  - [x] Existing non-semantic tool traces remain readable.
+- [x] Tool tests:
+  - [x] Shell schema accepts `purpose`.
+  - [x] Shell execution ignores `purpose` for process invocation.
+  - [x] Shell result metadata includes both `command` and semantic `activity`.
+- [x] Prompt tests:
+  - [x] Shell examples mention `purpose`.
+  - [x] `_activity` examples remain valid.
 
 ### Non-goals
 
-- [ ] No LLM-based summarization of arbitrary shell commands.
-- [ ] No removal of raw command data.
-- [ ] No change to JSON / stream-json event contracts beyond existing tool input/metadata additions.
-- [ ] No full dynamic terminal TUI.
-- [ ] No attempt to make every command perfectly human-readable in the first version.
+- [x] No LLM-based summarization of arbitrary shell commands.
+- [x] No removal of raw command data.
+- [x] No change to JSON / stream-json event contracts beyond existing tool input/metadata additions.
+- [x] No full dynamic terminal TUI.
+- [x] No attempt to make every command perfectly human-readable in the first version.
 
 ## Suggested Order
 
