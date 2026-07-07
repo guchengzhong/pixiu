@@ -1,6 +1,6 @@
 import { access, mkdir } from "node:fs/promises"
-import { existsSync } from "node:fs"
-import { delimiter, dirname, join, resolve } from "node:path"
+import { existsSync, readFileSync } from "node:fs"
+import { basename, delimiter, dirname, join, normalize, resolve } from "node:path"
 import { homedir } from "node:os"
 import { spawn } from "node:child_process"
 
@@ -18,6 +18,7 @@ export type ManagedEnvStatus = {
   autoInstall: ManagedEnvConfig["autoInstall"]
   envPath: string
   binPath: string
+  binPaths: string[]
   managerCommand?: string
   managerAvailable: boolean
   exists: boolean
@@ -36,10 +37,12 @@ export const BROWSER_USE_PACKAGE_REFS = ["browser-use[core]", "httpx[socks]"] as
 export function resolveManagedEnv(config: PixiuConfig, options: { cwd?: string } = {}) {
   const env = config.tools.managedEnv
   const envPath = env.path ? expandHome(env.path) : defaultEnvPath(env)
+  const binPaths = managedEnvExecutablePaths(env.manager, envPath)
   return {
     config: env,
     envPath,
-    binPath: env.manager === "venv" && process.platform === "win32" ? join(envPath, "Scripts") : join(envPath, "bin"),
+    binPath: binPaths[0] ?? join(envPath, "bin"),
+    binPaths,
     managerCommand: findManagerCommand(env.manager),
     cwd: options.cwd ?? process.cwd(),
   }
@@ -50,7 +53,6 @@ export async function inspectManagedEnv(config: PixiuConfig, options: { cwd?: st
   const tools = options.tools ?? ["agent-reach", "browser-use"]
   const exists = await pathExists(resolved.envPath)
   const managerAvailable = Boolean(resolved.managerCommand)
-  const binPath = resolved.binPath
   return {
     enabled: resolved.config.enabled,
     manager: resolved.config.manager,
@@ -60,28 +62,27 @@ export async function inspectManagedEnv(config: PixiuConfig, options: { cwd?: st
     prependPath: resolved.config.prependPath,
     autoInstall: resolved.config.autoInstall,
     envPath: resolved.envPath,
-    binPath,
+    binPath: resolved.binPath,
+    binPaths: resolved.binPaths,
     ...(resolved.managerCommand ? { managerCommand: resolved.managerCommand } : {}),
     managerAvailable,
     exists,
-    pathActive: pathContains(process.env.PATH ?? "", binPath),
+    pathActive: pathsInPath(process.env.PATH ?? "", resolved.binPaths),
     tools: Object.fromEntries(
-      await Promise.all(tools.map(async (tool) => [tool, await inspectManagedTool(tool, binPath)] as const)),
+      await Promise.all(tools.map(async (tool) => [tool, await inspectManagedTool(tool, resolved.binPaths)] as const)),
     ),
   }
 }
 
 export function managedEnvPathPrepend(config: PixiuConfig) {
   const resolved = resolveManagedEnv(config)
-  if (!resolved.config.enabled || !resolved.config.prependPath) return undefined
-  return resolved.binPath
+  if (!resolved.config.enabled || !resolved.config.prependPath) return []
+  return resolved.binPaths
 }
 
 export function buildManagedEnvPATH(config: PixiuConfig, currentPath = process.env.PATH ?? "") {
-  const prepend = managedEnvPathPrepend(config)
-  if (!prepend) return currentPath
-  if (pathContains(currentPath, prepend)) return currentPath
-  return [prepend, currentPath].filter(Boolean).join(delimiter)
+  const prepend = managedEnvPathPrepend(config).filter((item) => !pathContains(currentPath, item))
+  return [...prepend, currentPath].filter(Boolean).join(delimiter)
 }
 
 export async function createManagedEnv(config: PixiuConfig, options: { cwd?: string } = {}): Promise<ManagedEnvRunResult> {
@@ -158,9 +159,102 @@ function agentReachCandidates(cwd: string) {
 function defaultEnvPath(config: ManagedEnvConfig) {
   if (config.manager === "venv") return join(homedir(), ".pixiu", "tools", config.name)
   const condaPrefix = process.env.CONDA_PREFIX
-  if (condaPrefix && condaPrefix.endsWith(config.name)) return condaPrefix
+  if (condaPrefix && pathNameEquals(condaPrefix, config.name)) return condaPrefix
+  const discovered = discoverNamedEnvPath(config.name)
+  if (discovered) return discovered
   const condaRoot = process.env.CONDA_EXE ? dirname(dirname(process.env.CONDA_EXE)) : join(homedir(), "miniconda3")
   return join(condaRoot, "envs", config.name)
+}
+
+function discoverNamedEnvPath(name: string) {
+  for (const envDir of condaEnvDirs()) {
+    const candidate = join(envDir, name)
+    if (existsSync(candidate)) return candidate
+  }
+  return undefined
+}
+
+function condaEnvDirs() {
+  const condaRoot = process.env.CONDA_EXE ? dirname(dirname(process.env.CONDA_EXE)) : undefined
+  return unique([
+    ...splitPathList(process.env.CONDA_ENVS_PATH),
+    ...condarcEnvDirs(),
+    ...(condaRoot ? [join(condaRoot, "envs")] : []),
+    join(homedir(), ".conda", "envs"),
+    join(homedir(), "miniconda3", "envs"),
+    join(homedir(), "anaconda3", "envs"),
+  ].map(expandHome))
+}
+
+function condarcEnvDirs() {
+  const paths = unique([
+    process.env.CONDARC,
+    join(homedir(), ".condarc"),
+    ...(process.env.CONDA_EXE ? [join(dirname(dirname(process.env.CONDA_EXE)), ".condarc")] : []),
+    ...(process.platform === "win32" ? [join(process.env.ProgramData ?? "C:\\ProgramData", "conda", ".condarc")] : []),
+  ].filter((item): item is string => Boolean(item)))
+  return paths.flatMap((path) => parseCondarcEnvDirs(readTextIfExists(path)))
+}
+
+function readTextIfExists(path: string) {
+  try {
+    return readFileSync(path, "utf8")
+  } catch {
+    return ""
+  }
+}
+
+function parseCondarcEnvDirs(content: string) {
+  const lines = content.split(/\r?\n/)
+  const dirs: string[] = []
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = stripInlineComment(lines[index] ?? "")
+    const match = line.match(/^envs_dirs:\s*(.*)$/)
+    if (!match) continue
+    const inline = match[1]?.trim() ?? ""
+    if (inline.startsWith("[") && inline.endsWith("]")) {
+      dirs.push(...inline.slice(1, -1).split(",").map(cleanYamlScalar).filter(Boolean))
+      continue
+    }
+    if (inline) {
+      dirs.push(cleanYamlScalar(inline))
+      continue
+    }
+    while (index + 1 < lines.length) {
+      const next = stripInlineComment(lines[index + 1] ?? "")
+      if (!/^\s+/.test(next)) break
+      const item = next.match(/^\s*-\s*(.+)$/)?.[1]
+      index += 1
+      if (item) dirs.push(cleanYamlScalar(item))
+    }
+  }
+  return dirs.filter(Boolean)
+}
+
+function stripInlineComment(line: string) {
+  return line.replace(/\s+#.*$/, "").trimEnd()
+}
+
+function cleanYamlScalar(value: string) {
+  const trimmed = value.trim().replace(/^-\s*/, "")
+  if ((trimmed.startsWith("\"") && trimmed.endsWith("\"")) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1)
+  }
+  return trimmed
+}
+
+function splitPathList(value: string | undefined) {
+  return value?.split(delimiter).map((item) => item.trim()).filter(Boolean) ?? []
+}
+
+function managedEnvExecutablePaths(manager: ManagedEnvConfig["manager"], envPath: string) {
+  if (process.platform === "win32") {
+    if (manager === "conda" || manager === "mamba" || manager === "micromamba") {
+      return [envPath, join(envPath, "Scripts"), join(envPath, "Library", "bin"), join(envPath, "bin")]
+    }
+    return [join(envPath, "Scripts")]
+  }
+  return [join(envPath, "bin")]
 }
 
 function shouldUseEnvPath(config: ManagedEnvConfig) {
@@ -193,8 +287,8 @@ function commandInPath(command: string) {
   return undefined
 }
 
-async function inspectManagedTool(command: string, binPath: string) {
-  const path = await executablePath(command, binPath)
+async function inspectManagedTool(command: string, binPaths: string[]) {
+  const path = await executablePath(command, binPaths)
   return {
     command,
     available: Boolean(path),
@@ -202,11 +296,13 @@ async function inspectManagedTool(command: string, binPath: string) {
   }
 }
 
-async function executablePath(command: string, binPath: string) {
+async function executablePath(command: string, binPaths: string[]) {
   const suffixes = process.platform === "win32" ? [".exe", ".cmd", ".bat", ""] : [""]
-  for (const suffix of suffixes) {
-    const candidate = join(binPath, `${command}${suffix}`)
-    if (await pathExists(candidate)) return candidate
+  for (const binPath of binPaths) {
+    for (const suffix of suffixes) {
+      const candidate = join(binPath, `${command}${suffix}`)
+      if (await pathExists(candidate)) return candidate
+    }
   }
   return undefined
 }
@@ -274,7 +370,21 @@ async function runCommand(command: string, args: string[], options: { cwd: strin
 }
 
 function pathContains(pathValue: string, target: string) {
-  return pathValue.split(delimiter).some((item) => item === target)
+  const normalizedTarget = comparablePath(target)
+  return pathValue.split(delimiter).some((item) => comparablePath(item) === normalizedTarget)
+}
+
+function pathsInPath(pathValue: string, targets: string[]) {
+  return targets.every((target) => pathContains(pathValue, target))
+}
+
+function comparablePath(path: string) {
+  const normalized = normalize(path).replace(/[\\\/]+$/, "")
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized
+}
+
+function pathNameEquals(path: string, name: string) {
+  return comparablePath(basename(path)) === comparablePath(name)
 }
 
 function expandHome(path: string) {
