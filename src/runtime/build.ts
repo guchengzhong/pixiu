@@ -113,7 +113,7 @@ export async function buildRuntime(options: RuntimeOptions = {}): Promise<Runtim
     shellTimeoutMs: config.sandbox.shellTimeoutMs,
     outputMaxBytes: config.sandbox.outputMaxBytes,
     envAllowlist: config.sandbox.envAllowlist,
-    envPrependPath: [managedEnvPathPrepend(config)].filter((item): item is string => Boolean(item)),
+    envPrependPath: managedEnvPathPrepend(config),
     ...(config.tools.managedEnv.enabled ? { envOverrides: { PYTHONNOUSERSITE: "1" } } : {}),
   }
   const createToolContext = (root: string): Omit<ToolContext, "sessionId"> => ({

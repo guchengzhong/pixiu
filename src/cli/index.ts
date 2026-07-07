@@ -2436,6 +2436,7 @@ function formatManagedEnvStatus(status: ManagedEnvStatus) {
     `python: ${status.python}`,
     `path: ${status.envPath}`,
     `bin: ${status.binPath}`,
+    `bins: ${status.binPaths.join(", ")}`,
     `exists: ${status.exists ? "yes" : "no"}`,
     `PATH active: ${status.pathActive ? "yes" : "no"}`,
     `autoCreate: ${status.autoCreate ? "yes" : "no"}`,
