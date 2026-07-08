@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises"
-import { join } from "node:path"
+import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises"
+import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 
 import { createUiServer } from "../../src/ui/server/server"
@@ -527,6 +527,100 @@ describe("ui server", () => {
     } finally {
       await ui.close()
       await llm.close()
+    }
+  })
+
+  test("session in a project with a local rootPath runs inside that folder", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-root-"))
+    const workdir = await mkdtemp(join(tmpdir(), "pixiu-ui-workdir-"))
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const project = await json(await ui.fetch("http://127.0.0.1/api/projects", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ name: "Local", rootPath: workdir }),
+      }))
+      const session = await json(await ui.fetch("http://127.0.0.1/api/sessions", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ title: "in folder", projectId: project.data.project.id }),
+      }))
+      expect(resolve(session.data.session.cwd)).toBe(resolve(workdir))
+    } finally {
+      await ui.close()
+    }
+  })
+
+  test("a session in a rooted project writes into the real folder", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-root2-"))
+    const workdir = await mkdtemp(join(tmpdir(), "pixiu-ui-workdir2-"))
+    const llm = await createFakeLLMServer()
+    llm.tool("write", { path: "note.md", content: "# hello real folder" })
+    llm.text("FINAL: wrote note")
+    await writeFile(
+      join(root, "pixiu.jsonc"),
+      JSON.stringify({
+        model: "fake/model",
+        providers: { "openai-compatible": { baseURL: llm.url, apiKey: "sk-test", model: "fake/model" } },
+      }),
+      "utf8",
+    )
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const project = await json(await ui.fetch("http://127.0.0.1/api/projects", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ name: "Local", rootPath: workdir }),
+      }))
+      const session = await json(await ui.fetch("http://127.0.0.1/api/sessions", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ title: "write", projectId: project.data.project.id }),
+      }))
+      const run = await json(await ui.fetch("http://127.0.0.1/api/runs?wait=1", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ message: "write a note", sessionId: session.data.session.id, permissionMode: "acceptEdits" }),
+      }))
+      expect(run.data.answer).toBe("wrote note")
+      const written = await readFile(join(workdir, "note.md"), "utf8")
+      expect(written).toBe("# hello real folder")
+    } finally {
+      await ui.close()
+      await llm.close()
+    }
+  })
+
+  test("rejects a project rootPath that is not an existing directory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-badroot-"))
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const response = await ui.fetch("http://127.0.0.1/api/projects", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ name: "Bad", rootPath: join(root, "does-not-exist") }),
+      })
+      const body = await json(response)
+      expect(response.status).toBe(400)
+      expect(body.code).toBe("PROJECT_ROOT_INVALID")
+    } finally {
+      await ui.close()
+    }
+  })
+
+  test("default project sessions still use the sandbox workspace", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-default-"))
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const session = await json(await ui.fetch("http://127.0.0.1/api/sessions", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ title: "default" }),
+      }))
+      expect(session.data.session.cwd).toContain("workspace")
+      expect(resolve(session.data.session.cwd)).not.toBe(resolve(root))
+    } finally {
+      await ui.close()
     }
   })
 

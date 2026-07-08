@@ -26,7 +26,7 @@ import { collectSessionEvidence } from "../../session/evidence"
 import { apiFailure, apiSuccess, type ApiFailure, type UiConfigResponse, type UiProjectSummary, type UiProviderSummary, type UiSessionSummary, type UiStatus } from "../shared/api"
 import type { PermissionDecision, PermissionMode, PermissionRequest } from "../../permission/types"
 import type { AgentEvent } from "../../agent/events"
-import { PathGuard } from "../../sandbox/path"
+import { PathGuard, isInside } from "../../sandbox/path"
 import { createID } from "../../shared/id"
 import { redactSecrets } from "../../shared/redact"
 import { inspectMCPServers } from "../../mcp/status"
@@ -361,6 +361,7 @@ async function routeApi(request: Request, url: URL, context: UiServerContext): P
   if (request.method === "POST" && url.pathname === "/api/projects") {
     const input = await readJsonBody<ProjectCreateInput>(request)
     const runtime = await runtimeFor(context)
+    if (typeof input.rootPath === "string") await assertValidProjectRoot(runtime.cwd, input.rootPath)
     const project = await runtime.projects.create({
       ...(typeof input.name === "string" ? { name: input.name } : {}),
       ...(typeof input.rootPath === "string" ? { rootPath: input.rootPath } : {}),
@@ -372,6 +373,7 @@ async function routeApi(request: Request, url: URL, context: UiServerContext): P
   if (projectMatch && request.method === "PATCH") {
     const input = await readJsonBody<ProjectUpdateInput>(request)
     const runtime = await runtimeFor(context)
+    if (typeof input.rootPath === "string") await assertValidProjectRoot(runtime.cwd, input.rootPath)
     const project = await runtime.projects.update(decodeURIComponent(projectMatch[1] ?? ""), {
       ...(typeof input.name === "string" ? { name: input.name } : {}),
       ...(typeof input.rootPath === "string" ? { rootPath: input.rootPath } : {}),
@@ -1356,11 +1358,51 @@ async function artifactRefsForSession(session: SessionRecord, messages: SessionM
   return refs
 }
 
+// Rejects a project rootPath that is not an existing local directory. The chosen folder
+// becomes the working directory of every session in the project, so it must be real.
+async function assertValidProjectRoot(cwd: string, rootPath: string) {
+  const resolved = resolve(cwd, rootPath.trim())
+  let info
+  try {
+    info = await stat(resolved)
+  } catch {
+    throw new PixiuError(`Workspace root does not exist: ${rootPath}`, { code: "PROJECT_ROOT_INVALID" })
+  }
+  if (!info.isDirectory()) {
+    throw new PixiuError(`Workspace root is not a directory: ${rootPath}`, { code: "PROJECT_ROOT_INVALID" })
+  }
+}
+
 async function createUiSession(runtime: RuntimeWithoutLLM, input: SessionCreateInput) {
   const id = createID("session")
   const title = typeof input.title === "string" && input.title.trim() ? input.title.trim().slice(0, 80) : "New chat"
   const projectId = typeof input.projectId === "string" && input.projectId.trim() ? input.projectId.trim() : (await runtime.projects.current()).id
-  if (!(await runtime.projects.get(projectId))) throw new PixiuError(`Unknown project: ${projectId}`, { code: "PROJECT_NOT_FOUND" })
+  const project = await runtime.projects.get(projectId)
+  if (!project) throw new PixiuError(`Unknown project: ${projectId}`, { code: "PROJECT_NOT_FOUND" })
+
+  // When the project points at a real local folder (a rootPath other than the repo root),
+  // run the session directly in that folder so the agent reads/writes the user's files.
+  // Otherwise fall back to a per-session sandbox under the configured workspace dir.
+  const projectRoot = resolve(project.rootPath)
+  const projectRooted = projectRoot !== resolve(runtime.cwd)
+  if (projectRooted) {
+    await mkdir(projectRoot, { recursive: true })
+    return runtime.sessions.create({
+      id,
+      cwd: projectRoot,
+      title,
+      metadata: {
+        projectId,
+        titleSource: "user",
+        sandboxMode: runtime.config.sandbox.mode,
+        projectRooted: true,
+        workspaceDir: isInside(runtime.cwd, projectRoot) ? relative(runtime.cwd, projectRoot) || "." : projectRoot,
+        model: providerSummary(runtime.config).model,
+        finishStatus: "idle",
+      },
+    })
+  }
+
   if (runtime.config.sandbox.mode === "workspace") {
     const workspaceRoot =
       runtime.config.sandbox.workspaceDir && isAbsolute(runtime.config.sandbox.workspaceDir)
@@ -1664,6 +1706,7 @@ function statusForError(error: unknown) {
       "PATH_OUTSIDE_WORKSPACE",
       "UPLOAD_TOO_LARGE",
       "PROVIDER_API_KEY_MISSING",
+      "PROJECT_ROOT_INVALID",
     ].includes(error.code)
   ) {
     return 400

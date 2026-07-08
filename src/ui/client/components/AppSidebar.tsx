@@ -257,8 +257,8 @@ export function AppSidebar({
           {creatingProject ? (
             <div className="project-card project-create-form">
               <input value={newProjectName} autoFocus placeholder="Project name" onChange={(event) => setNewProjectName(event.currentTarget.value)} />
-              <input value={newProjectRoot} placeholder="Workspace root, optional" onChange={(event) => setNewProjectRoot(event.currentTarget.value)} />
-              <span className="form-hint">Leaving root blank uses the current Pixiu workspace. Removing a project later only removes metadata.</span>
+              <input value={newProjectRoot} placeholder="Workspace root (absolute local folder), optional" onChange={(event) => setNewProjectRoot(event.currentTarget.value)} />
+              <span className="form-hint">Set an absolute path to an existing local folder to chat and work directly inside it (the agent reads/writes those real files). Leave blank to use the sandboxed Pixiu workspace. Removing a project later only removes metadata.</span>
               <div className="inline-actions">
                 <button type="button" onClick={submitNewProject}>Create</button>
                 <button type="button" onClick={() => { setCreatingProject(false); setNewProjectName(""); setNewProjectRoot("") }}>Cancel</button>
