@@ -78,7 +78,11 @@ describe("ui client", () => {
     expect(toolFailure).toBe("web_search failed: fetch failed: 503 Service Unavailable")
     expect(agentFailure).toBe("Provider request failed")
     expect(streamDisconnectMessage(toolFailure)).toBe("web_search failed: fetch failed: 503 Service Unavailable")
-    expect(streamDisconnectMessage()).toBe("Run event stream disconnected.")
+    // With no real failure captured, fall back to the generic, user-readable copy
+    // (task may still be completing; points the user at the Activity panel).
+    const generic = streamDisconnectMessage()
+    expect(generic).not.toBe(toolFailure)
+    expect(generic).toContain("Activity")
   })
 
   test("renders error run results from result.error or the last tool failure", () => {

@@ -89,6 +89,9 @@ export function runShell(command: string, options: ShellRunOptions) {
         ...(options.envPrependPath ? { prependPath: options.envPrependPath } : {}),
         ...(options.envOverrides ? { overrides: options.envOverrides } : {}),
       }),
+      // Close stdin so interactive commands (e.g. Windows `cmd.exe date`/`time`/`pause`)
+      // receive EOF immediately instead of blocking until the timeout waiting for input.
+      stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     })
     let stdout = ""
@@ -96,9 +99,9 @@ export function runShell(command: string, options: ShellRunOptions) {
     let timedOut = false
     const timer = setTimeout(() => {
       timedOut = true
-      child.kill("SIGTERM")
+      killProcessTree(child)
     }, options.timeoutMs)
-    const abort = () => child.kill("SIGTERM")
+    const abort = () => killProcessTree(child)
     options.signal?.addEventListener("abort", abort, { once: true })
     child.stdout.on("data", (chunk) => {
       stdout += String(chunk)
@@ -124,6 +127,26 @@ export function runShell(command: string, options: ShellRunOptions) {
       })
     })
   })
+}
+
+// Reliably terminate a shell child and its descendants. Windows `cmd.exe` does not
+// forward SIGTERM to its children, so a plain child.kill leaves the tree running;
+// taskkill /t /f kills the whole tree. On POSIX SIGKILL is enough for our use.
+function killProcessTree(child: ReturnType<typeof spawn>) {
+  if (child.exitCode !== null || child.signalCode !== null) return
+  if (process.platform === "win32" && child.pid !== undefined) {
+    try {
+      spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true })
+      return
+    } catch {
+      // fall through to best-effort kill
+    }
+  }
+  try {
+    child.kill("SIGKILL")
+  } catch {
+    // process already gone
+  }
 }
 
 function redirectionTargets(command: string) {

@@ -97,6 +97,7 @@ function App() {
   const messageEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sessionIdRef = useRef<string | undefined>(undefined)
+  const activeSourceRef = useRef<EventSource | undefined>(undefined)
   const statusSummary = useMemo(
     () => ({
       ...(status ?? {}),
@@ -429,9 +430,29 @@ function App() {
 
   function subscribeRun(id: string) {
     return new Promise<void>((resolve, reject) => {
+      // Only one run stream may be active at a time. Close any prior stream so a stale
+      // run's events can't leak into the current bubble.
+      try {
+        activeSourceRef.current?.close()
+      } catch {
+        // already closed
+      }
       const source = api.eventSource(id)
+      activeSourceRef.current = source
+      const MAX_RECONNECTS = 5
       let settled = false
+      let opened = false
+      let reconnects = 0
       let lastFailure: string | undefined
+      source.onopen = () => {
+        if (opened) {
+          // Reconnected after a transient drop. The server replays buffered events, so
+          // reset the pending assistant bubble to let replayed deltas rebuild it cleanly.
+          reconnects = 0
+          replacePending("")
+        }
+        opened = true
+      }
       source.addEventListener("run_status", (event) => {
         const data = JSON.parse(event.data) as RunStatusEvent
         setRunStatus(data.status)
@@ -497,9 +518,18 @@ function App() {
           lastFailure = failure
           return
         }
-        source.close()
-        if (settled) return
-        reject(new Error(streamDisconnectMessage(lastFailure)))
+        if (settled) {
+          source.close()
+          return
+        }
+        // Connection-level drop. The run keeps executing on the server and buffers its
+        // events, so let EventSource auto-reconnect (it will replay, including the final
+        // result). Only give up after repeated failures with no successful reconnect.
+        reconnects += 1
+        if (reconnects > MAX_RECONNECTS) {
+          source.close()
+          reject(new Error(streamDisconnectMessage(lastFailure)))
+        }
       }
     })
   }

@@ -476,6 +476,60 @@ describe("ui server", () => {
     }
   })
 
+  test("serializes runs on the same session, superseding an in-flight run", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-serial-"))
+    const llm = await createFakeLLMServer()
+    llm.hang() // first run stalls mid-request until it is aborted by the second run
+    llm.text("FINAL: second answer")
+    await writeFile(
+      join(root, "pixiu.jsonc"),
+      JSON.stringify({
+        model: "fake/model",
+        providers: { "openai-compatible": { baseURL: llm.url, apiKey: "sk-test", model: "fake/model" } },
+      }),
+      "utf8",
+    )
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const created = await json(await ui.fetch("http://127.0.0.1/api/sessions", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ title: "serial" }),
+      }))
+      const sessionId = created.data.session.id
+
+      // Start the first run and let it reach the (hanging) provider request.
+      await ui.fetch("http://127.0.0.1/api/runs", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ message: "first", sessionId, permissionMode: "acceptEdits" }),
+      })
+      await llm.wait(1)
+
+      // A second run on the same session aborts the first and runs after it settles.
+      const second = await json(await ui.fetch("http://127.0.0.1/api/runs?wait=1", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ message: "second", sessionId, permissionMode: "acceptEdits" }),
+      }))
+
+      expect(second.data.answer).toBe("second answer")
+      expect(second.data.status).toBe("idle")
+
+      // The persisted history must be free of interleaving/orphans: no assistant message
+      // may declare a tool_call, and there is exactly one assistant answer ("second").
+      const detail = await json(await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}`, {
+        headers: { authorization: "Bearer test-token" },
+      }))
+      const assistants = detail.data.messages.filter((m: any) => m.role === "assistant")
+      expect(assistants.length).toBe(1)
+      expect(assistants[0].parts.some((p: any) => p.type === "tool_call")).toBe(false)
+    } finally {
+      await ui.close()
+      await llm.close()
+    }
+  })
+
   test("session detail includes persisted todos", async () => {
     const root = await mkdtemp(join(tmpdir(), "pixiu-ui-session-todos-"))
     const llm = await createFakeLLMServer()

@@ -162,9 +162,14 @@ export class AgentRunner {
         continuationMessages.length = 0
         draftContinuations = 0
 
+        const persistedCallIds = new Set<string>()
         for (const call of toolCalls) {
           const signal = input.signal ?? this.options.signal
           if (signal?.aborted) {
+            // Persist a result for every declared tool_call before bailing out, so the
+            // stored history never contains an assistant tool_call without a matching
+            // tool result (an orphan makes later LLM requests structurally illegal).
+            await this.persistCancelledToolResults(session.id, toolCalls.filter((item) => !persistedCallIds.has(item.id)))
             yield { type: "finish", reason: "cancelled", sessionId: session.id }
             return
           }
@@ -182,6 +187,15 @@ export class AgentRunner {
           )
           updateSkillRouteState(skillRouteState, call.name, cleanInput, result.ok, result.content, result.metadata)
           if (signal?.aborted) {
+            // The current call already ran but was not yet persisted; persist it and any
+            // remaining calls as results so no assistant tool_call is left orphaned.
+            await this.options.sessions.appendMessage({
+              sessionId: session.id,
+              role: "tool",
+              parts: [{ type: "tool_result", toolCallId: call.id, name: call.name, result }],
+            })
+            persistedCallIds.add(call.id)
+            await this.persistCancelledToolResults(session.id, toolCalls.filter((item) => !persistedCallIds.has(item.id)))
             yield { type: "finish", reason: "cancelled", sessionId: session.id }
             return
           }
@@ -190,6 +204,7 @@ export class AgentRunner {
             role: "tool",
             parts: [{ type: "tool_result", toolCallId: call.id, name: call.name, result }],
           })
+          persistedCallIds.add(call.id)
           const toolEvent = {
             type: "tool_result",
             id: call.id,
@@ -288,6 +303,23 @@ export class AgentRunner {
       title: input.title ?? input.message.slice(0, 60),
       ...(workspace?.metadata ? { metadata: workspace.metadata } : {}),
     })
+  }
+
+  private async persistCancelledToolResults(sessionId: string, calls: { id: string; name: string }[]) {
+    for (const call of calls) {
+      await this.options.sessions.appendMessage({
+        sessionId,
+        role: "tool",
+        parts: [
+          {
+            type: "tool_result",
+            toolCallId: call.id,
+            name: call.name,
+            result: { ok: false, content: "Tool call cancelled before completion." },
+          },
+        ],
+      })
+    }
   }
 
   private async autoInstallManagedToolIfAllowed(

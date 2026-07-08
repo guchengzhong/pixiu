@@ -113,7 +113,10 @@ export function assistantTextFromRunResult(result: RunResultLike, fallbackFailur
 }
 
 export function streamDisconnectMessage(fallbackFailure?: string) {
-  return fallbackFailure || "Run event stream disconnected."
+  return (
+    fallbackFailure ||
+    "与运行事件流的连接中断，且多次重连未恢复。任务可能仍在后台完成——请查看右侧 Activity 面板了解最后执行的步骤，或稍后重新打开该会话。"
+  )
 }
 
 export function failureMessageFromRunErrorEvent(event: Event) {

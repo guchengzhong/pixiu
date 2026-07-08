@@ -51,6 +51,10 @@ const CLIENT_BUNDLE = join(CLIENT_DIST_DIR, "App.js")
 const CLIENT_CSS = join(CLIENT_DIST_DIR, "App.css")
 const MAX_UPLOAD_FILE_BYTES = 25 * 1024 * 1024
 const MAX_SESSION_UPLOAD_BYTES = 100 * 1024 * 1024
+// Interval for SSE keepalive comment lines. Kept well under the socket idleTimeout and
+// common proxy/browser idle windows so a run that is silent (e.g. a long tool call) does
+// not get its event stream dropped.
+const SSE_HEARTBEAT_MS = 15_000
 const PROVIDER_ENDPOINT_ALIASES: Record<string, string> = {
   openai: "https://api.openai.com/v1",
   siliconflow: "https://api.siliconflow.cn/v1",
@@ -83,6 +87,11 @@ type UiServerContext = {
   runtime?: RuntimeWithoutLLM
   runs: Map<string, UiRunRecord>
   sessionPermissions: Map<string, Set<string>>
+  // Per-session tail promise: runs on the same session execute strictly serially so they
+  // never interleave writes into the same session jsonl. Concurrent writes corrupt the
+  // message sequence (duplicate/orphaned tool_calls) and make subsequent LLM requests
+  // structurally illegal, which the provider rejects wholesale.
+  sessionRunTail: Map<string, Promise<unknown>>
 }
 
 type ProviderConfigInput = {
@@ -180,6 +189,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
     token,
     runs: new Map(),
     sessionPermissions: new Map(),
+    sessionRunTail: new Map(),
     ...(options.cwd ? { cwd: options.cwd } : {}),
   }
   let server: Server
@@ -187,6 +197,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
     server = Bun.serve({
       hostname: host,
       port,
+      // SSE run streams can stay open with no data during long tool calls; raise the
+      // socket idle timeout to Bun's max so the connection is not dropped mid-run.
+      // The per-stream heartbeat in streamRunEvents keeps traffic flowing under this.
+      idleTimeout: 255,
       async fetch(request) {
         return handleUiRequest(request, context)
       },
@@ -219,6 +233,7 @@ export async function createUiServer(options: { cwd?: string; token?: string } =
     token,
     runs: new Map(),
     sessionPermissions: new Map(),
+    sessionRunTail: new Map(),
     ...(options.cwd ? { cwd: options.cwd } : {}),
   }
   return {
@@ -570,7 +585,24 @@ function startAgentRun(context: UiServerContext, input: RunInput) {
   }
   context.runs.set(run.id, run)
   setRunStatus(run, "queued", { message: "Run queued.", phase: "starting" })
-  run.done = Promise.resolve().then(() => executeRun(context, run))
+  if (sessionId) {
+    // Abort any in-flight run on this session and chain execution after the previous
+    // run on the same session fully settles, so runs never write the session jsonl
+    // concurrently.
+    for (const other of context.runs.values()) {
+      if (other !== run && other.input.sessionId === sessionId && !isRunTerminal(other)) {
+        other.controller.abort()
+        denyPendingPermissions(other, "superseded by a newer run on this session")
+      }
+    }
+    const previousTail = context.sessionRunTail.get(sessionId)
+    run.done = Promise.resolve(previousTail)
+      .catch(() => undefined)
+      .then(() => executeRun(context, run))
+    context.sessionRunTail.set(sessionId, run.done.catch(() => undefined))
+  } else {
+    run.done = Promise.resolve().then(() => executeRun(context, run))
+  }
   return run
 }
 
@@ -787,6 +819,7 @@ function stablePermissionInput(value: unknown) {
 function streamRunEvents(run: UiRunRecord, signal?: AbortSignal) {
   const encoder = new TextEncoder()
   let controllerRef: ReadableStreamDefaultController<Uint8Array> | undefined
+  let heartbeatTimer: ReturnType<typeof setInterval> | undefined
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       controllerRef = controller
@@ -799,7 +832,17 @@ function streamRunEvents(run: UiRunRecord, signal?: AbortSignal) {
         return
       }
       run.subscribers.add(controller)
+      // Keepalive: emit an SSE comment line periodically so the connection stays alive
+      // during long silent periods. Self-clears if the stream is already closed.
+      const heartbeat = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(": keepalive\n\n"))
+        } catch {
+          clearInterval(heartbeat)
+        }
+      }, SSE_HEARTBEAT_MS)
       const cleanup = () => {
+        clearInterval(heartbeat)
         run.subscribers.delete(controller)
         try {
           controller.close()
@@ -807,9 +850,11 @@ function streamRunEvents(run: UiRunRecord, signal?: AbortSignal) {
           // already closed
         }
       }
+      heartbeatTimer = heartbeat
       signal?.addEventListener("abort", cleanup, { once: true })
     },
     cancel() {
+      if (heartbeatTimer) clearInterval(heartbeatTimer)
       if (controllerRef) run.subscribers.delete(controllerRef)
     },
   })
