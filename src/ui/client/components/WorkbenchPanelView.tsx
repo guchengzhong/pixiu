@@ -40,6 +40,7 @@ export function WorkbenchPanelView({
   onReferenceFile,
   onConfigureApi,
   onRefresh,
+  onBrowseFolder,
 }: {
   panel: Exclude<WorkbenchPanel, "chat">
   projects: UiProjectSummary[]
@@ -65,6 +66,7 @@ export function WorkbenchPanelView({
   onReferenceFile(file: UiFileSummary, source: FileReferenceSource): void
   onConfigureApi(): void
   onRefresh(): void
+  onBrowseFolder?(): Promise<string | undefined>
 }) {
   return (
     <div className="workbench-panel-view">
@@ -82,6 +84,7 @@ export function WorkbenchPanelView({
           onRenameSession={onRenameSession}
           onRemoveSessionFromList={onRemoveSessionFromList}
           onMoveSession={onMoveSession}
+          onBrowseFolder={onBrowseFolder}
         />
       ) : null}
       {panel === "skills" ? <SkillsPanel skills={skills} onRefresh={onRefresh} /> : null}
@@ -113,6 +116,7 @@ function ProjectsPanel({
   onRenameSession,
   onRemoveSessionFromList,
   onMoveSession,
+  onBrowseFolder,
 }: {
   projects: UiProjectSummary[]
   currentProjectId: string | undefined
@@ -126,6 +130,7 @@ function ProjectsPanel({
   onRenameSession(sessionId: string, title: string): void
   onRemoveSessionFromList(sessionId: string): void
   onMoveSession(sessionId: string, projectId: string): void
+  onBrowseFolder?(): Promise<string | undefined>
 }) {
   const [newProjectOpen, setNewProjectOpen] = useState(false)
   const [newProjectName, setNewProjectName] = useState("")
@@ -175,8 +180,13 @@ function ProjectsPanel({
           {newProjectOpen ? (
             <div className="panel-row project-create-form">
               <input value={newProjectName} autoFocus placeholder="Project name" onChange={(event) => setNewProjectName(event.currentTarget.value)} />
-              <input value={newProjectRoot} placeholder="Workspace root, optional" onChange={(event) => setNewProjectRoot(event.currentTarget.value)} />
-              <small>Leaving root blank uses the current Pixiu workspace. This creates a Pixiu grouping entry, not a folder.</small>
+              <div className="inline-field">
+                <input value={newProjectRoot} placeholder="Workspace root (absolute local folder), optional" onChange={(event) => setNewProjectRoot(event.currentTarget.value)} />
+                {onBrowseFolder ? (
+                  <button type="button" onClick={async () => { const picked = await onBrowseFolder(); if (picked) setNewProjectRoot(picked) }}>Browse…</button>
+                ) : null}
+              </div>
+              <small>Set an absolute path to an existing local folder to work directly inside it. Leaving root blank uses the sandboxed Pixiu workspace.</small>
               <div className="panel-row-actions">
                 <button type="button" onClick={submitNewProject}>Create</button>
                 <button type="button" onClick={() => { setNewProjectOpen(false); setNewProjectName(""); setNewProjectRoot("") }}>Cancel</button>

@@ -26,6 +26,19 @@ export type ApiFailure = {
 
 export type ApiResponse<T> = ApiSuccess<T> | ApiFailure
 
+export type UiFsEntry = {
+  name: string
+  path: string
+}
+
+export type UiFsListing = {
+  path: string
+  parent?: string
+  entries: UiFsEntry[]
+  drives: string[]
+  home: string
+}
+
 export type UiProviderSummary = {
   baseURL?: string
   model: string

@@ -21,6 +21,7 @@ import { createUiApiClient, resolveUiToken, type ProviderConfigPayload } from ".
 import { AppSidebar } from "./components/AppSidebar"
 import { ChatPane } from "./components/ChatPane"
 import { ConfigModal } from "./components/ConfigModal"
+import { FolderPicker } from "./components/FolderPicker"
 import { PermissionModal } from "./components/PermissionModal"
 import { RightInspector } from "./components/RightInspector"
 import { TopBar } from "./components/TopBar"
@@ -94,6 +95,7 @@ function App() {
   const [endpointPreset, setEndpointPreset] = useState<keyof typeof ENDPOINTS | "custom">("siliconflow")
   const [permission, setPermission] = useState<PermissionView>()
   const [status, setStatus] = useState<StatusSummary>()
+  const [folderPicker, setFolderPicker] = useState<{ resolve(path?: string): void }>()
   const messageEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sessionIdRef = useRef<string | undefined>(undefined)
@@ -664,6 +666,16 @@ function App() {
     return limitActivityItems([...byId.values()])
   }
 
+  // Opens the folder picker and resolves with the chosen absolute path (or undefined on cancel).
+  function browseFolder(): Promise<string | undefined> {
+    return new Promise((resolve) => setFolderPicker({ resolve }))
+  }
+
+  function closeFolderPicker(path?: string) {
+    folderPicker?.resolve(path)
+    setFolderPicker(undefined)
+  }
+
   return (
     <WorkbenchLayout
       sidebarCollapsed={sidebarCollapsed}
@@ -687,6 +699,7 @@ function App() {
           onOpenPanel={setWorkbenchPanel}
           onSelectProject={(id) => void selectProject(id)}
           onCreateProject={(input) => void createProject(input)}
+          onBrowseFolder={browseFolder}
           onRenameProject={(id, name) => void renameProject(id, name)}
           onRemoveProjectEntry={(id) => void removeProjectEntry(id)}
           onRenameSession={(id, title) => void renameSession(id, title)}
@@ -731,7 +744,18 @@ function App() {
           test={() => void testProvider()}
         />
       }
-      permissionModal={<PermissionModal permission={permission} answer={(action, scope) => void answerPermission(action, scope)} />}
+      permissionModal={
+        <>
+          <PermissionModal permission={permission} answer={(action, scope) => void answerPermission(action, scope)} />
+          {folderPicker ? (
+            <FolderPicker
+              listDir={(path) => api.listDir(path)}
+              onSelect={(path) => closeFolderPicker(path)}
+              onClose={() => closeFolderPicker(undefined)}
+            />
+          ) : null}
+        </>
+      }
     >
       {workbenchPanel === "chat" ? (
         <ChatPane
@@ -778,6 +802,7 @@ function App() {
           onRenameProject={(id, name) => void renameProject(id, name)}
           onRemoveProjectEntry={(id) => void removeProjectEntry(id)}
           onSelectProject={(id) => void selectProject(id)}
+          onBrowseFolder={browseFolder}
           onCreateSession={() => void createSession("New chat")}
           onLoadSession={(id) => void loadSession(id)}
           onRenameSession={(id, title) => void renameSession(id, title)}

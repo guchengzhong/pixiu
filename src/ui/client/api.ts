@@ -6,6 +6,7 @@ import type {
   UiMcpServerSummary,
   UiProjectSummary,
   UiProviderSummary,
+  UiFsListing,
   UiRunResult,
   UiSessionDetail,
   UiSessionSummary,
@@ -37,6 +38,7 @@ export type UiApiClient = {
   startRun(input: { message: string; sessionId?: string; permissionMode: string }): Promise<{ runId: string; status: RunStatus }>
   cancelRun(runId: string): Promise<{ runId: string; status: RunStatus }>
   answerPermission(id: string, input: { action: "allow" | "deny"; scope: "once" | "sessionSimilar" }): Promise<{ id: string; action: string }>
+  listDir(path?: string): Promise<UiFsListing>
   eventSource(runId: string): EventSource
 }
 
@@ -164,6 +166,8 @@ export function createUiApiClient(token: string, fetchImpl: UiFetch = fetch): Ui
         method: "POST",
         body: JSON.stringify(input),
       }),
+    listDir: (path) =>
+      requestJson<UiFsListing>(`/api/fs/list${path ? `?path=${encodeURIComponent(path)}` : ""}`),
     eventSource(runId) {
       return new EventSource(withTokenQuery(`/api/runs/${encodeURIComponent(runId)}/events`))
     },

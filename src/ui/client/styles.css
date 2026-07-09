@@ -397,3 +397,19 @@ button:disabled { cursor: default; }
   .empty h1 { font-size: 26px; }
   .composer-row { align-items: flex-end; }
 }
+
+/* Folder picker */
+.inline-field { display: flex; gap: 6px; align-items: center; }
+.inline-field input { flex: 1; min-width: 0; }
+.folder-picker { width: min(560px, 92vw); }
+.folder-picker-body { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; }
+.folder-picker-toolbar { display: flex; gap: 6px; align-items: center; }
+.folder-picker-toolbar input { flex: 1; min-width: 0; }
+.folder-picker-drives { display: flex; flex-wrap: wrap; gap: 6px; }
+.folder-picker-current { font-size: 12px; opacity: .75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-picker-list { max-height: 46vh; overflow-y: auto; border: 1px solid rgba(0, 0, 0, .1); border-radius: 8px; }
+.folder-picker-item { display: flex; gap: 8px; align-items: center; width: 100%; padding: 7px 10px; background: none; border: none; border-bottom: 1px solid rgba(0, 0, 0, .05); text-align: left; cursor: pointer; }
+.folder-picker-item:hover { background: rgba(59, 142, 234, .1); }
+.folder-picker-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-picker-empty { padding: 16px; text-align: center; opacity: .6; font-size: 13px; }
+.folder-picker-empty.error { color: #c0392b; opacity: 1; }
