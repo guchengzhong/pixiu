@@ -624,6 +624,57 @@ describe("ui server", () => {
     }
   })
 
+  test("lists subdirectories for the folder picker", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-fs-"))
+    await mkdir(join(root, "alpha"))
+    await mkdir(join(root, "beta"))
+    await writeFile(join(root, "note.txt"), "x", "utf8")
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const body = await json(await ui.fetch(`http://127.0.0.1/api/fs/list?path=${encodeURIComponent(root)}&token=test-token`, {
+        headers: { authorization: "Bearer test-token" },
+      }))
+      expect(body.ok).toBe(true)
+      const names = body.data.entries.map((entry: any) => entry.name)
+      expect(names).toEqual(["alpha", "beta"]) // directories only, sorted; note.txt excluded
+      expect(resolve(body.data.path)).toBe(resolve(root))
+      expect(typeof body.data.parent).toBe("string")
+      expect(typeof body.data.home).toBe("string")
+    } finally {
+      await ui.close()
+    }
+  })
+
+  test("rejects a fs/list path that is a file", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-fsfile-"))
+    await writeFile(join(root, "note.txt"), "x", "utf8")
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const response = await ui.fetch(`http://127.0.0.1/api/fs/list?path=${encodeURIComponent(join(root, "note.txt"))}&token=test-token`, {
+        headers: { authorization: "Bearer test-token" },
+      })
+      const body = await json(response)
+      expect(response.status).toBe(400)
+      expect(body.code).toBe("FS_PATH_INVALID")
+    } finally {
+      await ui.close()
+    }
+  })
+
+  test("fs/list defaults to the home directory when no path is given", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-fshome-"))
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const body = await json(await ui.fetch("http://127.0.0.1/api/fs/list?token=test-token", {
+        headers: { authorization: "Bearer test-token" },
+      }))
+      expect(body.ok).toBe(true)
+      expect(resolve(body.data.path)).toBe(resolve(body.data.home))
+    } finally {
+      await ui.close()
+    }
+  })
+
   test("session detail includes persisted todos", async () => {
     const root = await mkdtemp(join(tmpdir(), "pixiu-ui-session-todos-"))
     const llm = await createFakeLLMServer()

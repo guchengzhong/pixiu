@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto"
 import { access, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises"
-import { basename, isAbsolute, join, relative, resolve } from "node:path"
+import { homedir } from "node:os"
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 
 import { approximateTokens } from "../../agent/compaction"
 import {
@@ -309,6 +310,10 @@ async function routeApi(request: Request, url: URL, context: UiServerContext): P
 
   if (request.method === "POST" && url.pathname === "/api/config/test-provider") {
     return jsonResponse(apiSuccess(await testProvider(context)))
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/fs/list") {
+    return jsonResponse(apiSuccess(await listLocalDirectory(url.searchParams.get("path") ?? undefined)))
   }
 
   if (request.method === "GET" && url.pathname === "/api/skills") {
@@ -1358,6 +1363,58 @@ async function artifactRefsForSession(session: SessionRecord, messages: SessionM
   return refs
 }
 
+// Read-only local directory browser backing the UI folder picker. Lists the subdirectories
+// of `path` (default: the server user's home) so the user can navigate and pick a workspace
+// root. Local, token-gated, and directory-names only.
+async function listLocalDirectory(path?: string) {
+  const base = path && path.trim() ? resolve(path.trim()) : homedir()
+  let info
+  try {
+    info = await stat(base)
+  } catch {
+    throw new PixiuError(`Folder does not exist: ${base}`, { code: "FS_PATH_INVALID" })
+  }
+  if (!info.isDirectory()) throw new PixiuError(`Not a directory: ${base}`, { code: "FS_PATH_INVALID" })
+
+  const entries: { name: string; path: string }[] = []
+  for (const entry of await readdir(base, { withFileTypes: true })) {
+    let isDir = entry.isDirectory()
+    if (entry.isSymbolicLink()) {
+      try {
+        isDir = (await stat(join(base, entry.name))).isDirectory()
+      } catch {
+        isDir = false
+      }
+    }
+    if (isDir) entries.push({ name: entry.name, path: join(base, entry.name) })
+  }
+  entries.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()))
+
+  const parent = dirname(base)
+  return {
+    path: base,
+    ...(parent !== base ? { parent } : {}),
+    entries,
+    drives: await windowsDrives(),
+    home: homedir(),
+  }
+}
+
+async function windowsDrives() {
+  if (process.platform !== "win32") return [] as string[]
+  const drives: string[] = []
+  for (let code = 65; code <= 90; code += 1) {
+    const root = `${String.fromCharCode(code)}:\\`
+    try {
+      await access(root)
+      drives.push(root)
+    } catch {
+      // drive not present
+    }
+  }
+  return drives
+}
+
 // Rejects a project rootPath that is not an existing local directory. The chosen folder
 // becomes the working directory of every session in the project, so it must be real.
 async function assertValidProjectRoot(cwd: string, rootPath: string) {
@@ -1707,6 +1764,7 @@ function statusForError(error: unknown) {
       "UPLOAD_TOO_LARGE",
       "PROVIDER_API_KEY_MISSING",
       "PROJECT_ROOT_INVALID",
+      "FS_PATH_INVALID",
     ].includes(error.code)
   ) {
     return 400
