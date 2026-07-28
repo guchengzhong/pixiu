@@ -1,38 +1,58 @@
-import { useMemo, useState } from "react"
+import {
+  Check,
+  ChevronRight,
+  Files,
+  FolderGit2,
+  MoreHorizontal,
+  Network,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Pencil,
+  Plus,
+  Puzzle,
+  Search,
+  Settings,
+  Sparkles,
+  SquarePen,
+  Trash2,
+  X,
+} from "lucide-react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import type { KeyboardEvent } from "react"
 
 import type { UiProjectSummary, UiSessionSummary } from "../../shared/api"
-import type { StatusSummary, WorkbenchPanel } from "../types"
 import { pathBasename, shortDate } from "../helpers"
+import type { StatusSummary, WorkbenchPanel } from "../types"
+import { WORKBENCH_NAVIGATION_ID, WORKBENCH_NAVIGATION_TRIGGER_ID } from "./WorkbenchLayout"
 
-function SidebarToggleIcon() {
-  return (
-    <svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="4" y="5" width="16" height="14" rx="3" />
-      <path d="M10 5v14" />
-    </svg>
-  )
+const MOBILE_DRAWER_QUERY = "(max-width: 1050px)"
+const FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "summary",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",")
+
+function useMobileDrawer() {
+  const [mobile, setMobile] = useState(() => typeof window !== "undefined" && window.matchMedia(MOBILE_DRAWER_QUERY).matches)
+
+  useEffect(() => {
+    const query = window.matchMedia(MOBILE_DRAWER_QUERY)
+    const update = () => setMobile(query.matches)
+    update()
+    query.addEventListener("change", update)
+    return () => query.removeEventListener("change", update)
+  }, [])
+
+  return mobile
 }
 
-function NewChatIcon() {
-  return (
-    <svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 5H7a3 3 0 0 0-3 3v9a3 3 0 0 0 3 3h9a3 3 0 0 0 3-3v-5" />
-      <path d="M14 4h6v6" />
-      <path d="M10 14 20 4" />
-    </svg>
-  )
-}
-
-function ApiIcon() {
-  return (
-    <svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 4v4" />
-      <path d="M12 16v4" />
-      <path d="M4 12h4" />
-      <path d="M16 12h4" />
-      <circle cx="12" cy="12" r="4" />
-    </svg>
-  )
+function focusableElements(container: HTMLElement) {
+  return [...container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)]
+    .filter((element) => element.tabIndex >= 0 && element.getClientRects().length > 0 && element.getAttribute("aria-hidden") !== "true")
 }
 
 export function AppSidebar({
@@ -48,7 +68,9 @@ export function AppSidebar({
   sessionsLoading,
   sessionsError,
   collapsed,
+  mobileOpen,
   onToggleCollapsed,
+  onCloseMobileNav,
   onNewChat,
   onOpenPanel,
   onSelectProject,
@@ -74,7 +96,9 @@ export function AppSidebar({
   sessionsLoading: boolean
   sessionsError: string | undefined
   collapsed: boolean
+  mobileOpen: boolean
   onToggleCollapsed(): void
+  onCloseMobileNav(): void
   onNewChat(): void
   onOpenPanel(panel: WorkbenchPanel): void
   onSelectProject(projectId: string): void
@@ -94,35 +118,63 @@ export function AppSidebar({
   const [newProjectRoot, setNewProjectRoot] = useState("")
   const [editingProjectId, setEditingProjectId] = useState<string>()
   const [editingProjectName, setEditingProjectName] = useState("")
-  const [confirmRemoveProjectId, setConfirmRemoveProjectId] = useState<string>()
   const [editingSessionId, setEditingSessionId] = useState<string>()
   const [editingSessionTitle, setEditingSessionTitle] = useState("")
-  const [confirmDeleteSessionId, setConfirmDeleteSessionId] = useState<string>()
+  const isMobileDrawer = useMobileDrawer()
+  const sidebarRef = useRef<HTMLElement>(null)
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
   const normalizedQuery = query.trim().toLowerCase()
   const activeProject = projects.find((project) => project.id === currentProjectId) ?? projects[0]
-  const activeProjectPath = activeProject?.rootPath ?? status?.cwd ?? workspace
-  const activeProjectName = activeProject?.name ?? (pathBasename(activeProjectPath) || "Project")
   const filteredSessions = useMemo(() => {
     const projectSessions = currentProjectId ? sessions.filter((session) => session.projectId === currentProjectId) : sessions
     if (!normalizedQuery) return projectSessions
-    return projectSessions.filter((session) =>
-      [
-        session.title ?? "Untitled chat",
-        session.preview ?? "",
-        session.workspaceDir ?? "",
-        session.cwd,
-        session.model ?? "",
-        session.finishStatus ?? "",
-      ]
-        .join(" ")
-        .toLowerCase()
-        .includes(normalizedQuery),
-    )
+    return projectSessions.filter((session) => `${session.title ?? ""} ${session.preview ?? ""} ${session.cwd}`.toLowerCase().includes(normalizedQuery))
   }, [currentProjectId, normalizedQuery, sessions])
-  const mcpConnected = status?.mcp?.connected ?? 0
-  const mcpConfigured = status?.mcp?.configured ?? 0
 
-  function submitNewProject() {
+  useEffect(() => {
+    if (!isMobileDrawer || !mobileOpen) return
+    const activeElement = document.activeElement
+    const restoreFocus = activeElement instanceof HTMLElement && !sidebarRef.current?.contains(activeElement)
+      ? activeElement
+      : document.getElementById(WORKBENCH_NAVIGATION_TRIGGER_ID)
+    const frame = window.requestAnimationFrame(() => closeButtonRef.current?.focus())
+
+    return () => {
+      window.cancelAnimationFrame(frame)
+      if (restoreFocus instanceof HTMLElement && restoreFocus.isConnected) restoreFocus.focus()
+    }
+  }, [isMobileDrawer, mobileOpen])
+
+  function handleDrawerKeyDown(event: KeyboardEvent<HTMLElement>) {
+    if (!isMobileDrawer || !mobileOpen) return
+    if (event.key === "Escape") {
+      event.preventDefault()
+      event.stopPropagation()
+      onCloseMobileNav()
+      return
+    }
+    if (event.key !== "Tab" || !sidebarRef.current) return
+    const focusable = focusableElements(sidebarRef.current)
+    if (!focusable.length) {
+      event.preventDefault()
+      sidebarRef.current.focus()
+      return
+    }
+    const currentIndex = focusable.indexOf(document.activeElement as HTMLElement)
+    const next = event.shiftKey
+      ? currentIndex <= 0 ? focusable.at(-1) : undefined
+      : currentIndex === -1 || currentIndex === focusable.length - 1 ? focusable[0] : undefined
+    if (!next) return
+    event.preventDefault()
+    next.focus()
+  }
+
+  function navigate(action: () => void) {
+    action()
+    onCloseMobileNav()
+  }
+
+  function submitProject() {
     const name = newProjectName.trim()
     if (!name) return
     onCreateProject({ name, ...(newProjectRoot.trim() ? { rootPath: newProjectRoot.trim() } : {}) })
@@ -131,238 +183,140 @@ export function AppSidebar({
     setNewProjectRoot("")
   }
 
-  function startProjectRename(project: UiProjectSummary) {
-    setEditingProjectId(project.id)
-    setEditingProjectName(project.name)
-    setConfirmRemoveProjectId(undefined)
-  }
-
-  function submitProjectRename(projectId: string) {
-    const name = editingProjectName.trim()
-    if (!name) return
-    onRenameProject(projectId, name)
-    setEditingProjectId(undefined)
-    setEditingProjectName("")
-  }
-
-  function startSessionRename(session: UiSessionSummary) {
-    setEditingSessionId(session.id)
-    setEditingSessionTitle(session.title ?? "Untitled chat")
-    setConfirmDeleteSessionId(undefined)
-  }
-
-  function submitSessionRename(id: string) {
-    const title = editingSessionTitle.trim()
-    if (!title) return
-    onRenameSession(id, title)
-    setEditingSessionId(undefined)
-    setEditingSessionTitle("")
-  }
-
   return (
-    <aside className="sidebar workbench-sidebar">
-      <div className="brand">
-        <div className="brand-mark">P</div>
-        <div className="brand-text">Pixiu</div>
-        <button className="icon-button sidebar-toggle" type="button" title={collapsed ? "Expand sidebar" : "Collapse sidebar"} onClick={onToggleCollapsed}>
-          <SidebarToggleIcon />
-        </button>
-      </div>
-      <div className="sidebar-actions">
-        <button className="side-button" onClick={onNewChat} title="New chat">
-          <span className="side-icon"><NewChatIcon /></span>
-          <span className="label">New chat</span>
-        </button>
-        <button className="side-button" onClick={onConfigureApi} title="Configure API">
-          <span className="side-icon"><ApiIcon /></span>
-          <span className="label">Configure API</span>
-        </button>
-      </div>
-      <div className="side-section">
-        <div className="sidebar-search">
-          <input value={query} onChange={(event) => setQuery(event.currentTarget.value)} placeholder="Search sessions" />
+    <aside
+      className={`sidebar workbench-sidebar ${mobileOpen ? "mobile-open" : ""}`}
+      id={WORKBENCH_NAVIGATION_ID}
+      ref={sidebarRef}
+      role={isMobileDrawer ? "dialog" : undefined}
+      aria-label="Pixiu navigation"
+      aria-modal={isMobileDrawer && mobileOpen ? true : undefined}
+      aria-hidden={isMobileDrawer && !mobileOpen ? true : undefined}
+      inert={isMobileDrawer && !mobileOpen ? true : undefined}
+      tabIndex={isMobileDrawer ? -1 : undefined}
+      onKeyDown={handleDrawerKeyDown}
+    >
+      <header className="brand">
+        <div className="brand-mark" aria-hidden="true"><Sparkles /></div>
+        <div className="brand-copy">
+          <strong>Pixiu</strong>
+          <span>{activeProject?.name ?? "Local agent"}</span>
         </div>
-        <div className="side-title">Workbench</div>
-        <div className="nav-list">
-          <button className={`nav-item ${activePanel === "projects" ? "active" : ""}`} type="button" title={activeProjectPath ?? "Current workspace root"} onClick={() => onOpenPanel("projects")}>
-            <span className="nav-icon">P</span>
-            <span className="nav-label">Projects</span>
-            <span className="nav-meta">{activeProjectName}</span>
-          </button>
-          <button className={`nav-item ${activePanel === "skills" ? "active" : ""}`} type="button" title="Skills" onClick={() => onOpenPanel("skills")}>
-            <span className="nav-icon">S</span>
-            <span className="nav-label">Skills</span>
-            <span className="nav-count">{skillCount}</span>
-          </button>
-          <button className={`nav-item ${activePanel === "mcp" ? "active" : ""}`} type="button" title="MCP status" onClick={() => onOpenPanel("mcp")}>
-            <span className="nav-icon">M</span>
-            <span className="nav-label">MCP</span>
-            <span className="nav-count">{mcpConnected}/{mcpConfigured}</span>
-          </button>
-          <button className={`nav-item ${activePanel === "workspace" ? "active" : ""}`} type="button" title={workspace ?? "Workspace"} onClick={() => onOpenPanel("workspace")}>
-            <span className="nav-icon">W</span>
-            <span className="nav-label">Workspace</span>
-          </button>
-          <button className={`nav-item ${activePanel === "settings" ? "active" : ""}`} type="button" title="Settings / API" onClick={() => onOpenPanel("settings")}>
-            <span className="nav-icon">A</span>
-            <span className="nav-label">Settings / API</span>
-            <span className={`nav-status ${providerReady ? "ok" : "warn"}`} />
-          </button>
-        </div>
-        <div className="side-title">Projects</div>
-        <div className="project-list">
-          {projects.map((project) => (
-            <div className={`project-card project-row ${project.id === currentProjectId ? "active" : ""}`} key={project.id} title={project.rootPath}>
-              <button className="project-main" type="button" onClick={() => onSelectProject(project.id)}>
-                <span className="project-name">{project.name}</span>
-                <span className="project-path">{project.sessionCount} sessions · Workspace root: {project.rootPath}</span>
-              </button>
-              {editingProjectId === project.id ? (
-                <div className="inline-edit">
-                  <input
-                    value={editingProjectName}
-                    autoFocus
-                    onChange={(event) => setEditingProjectName(event.currentTarget.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") submitProjectRename(project.id)
-                      if (event.key === "Escape") setEditingProjectId(undefined)
-                    }}
-                  />
-                  <div className="inline-actions">
-                    <button type="button" onClick={() => submitProjectRename(project.id)}>Save</button>
-                    <button type="button" onClick={() => setEditingProjectId(undefined)}>Cancel</button>
+        <button className="icon-button sidebar-toggle" type="button" aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"} title={collapsed ? "Expand sidebar" : "Collapse sidebar"} onClick={onToggleCollapsed}>
+          {collapsed ? <PanelLeftOpen aria-hidden="true" /> : <PanelLeftClose aria-hidden="true" />}
+        </button>
+        <button ref={closeButtonRef} className="icon-button mobile-nav-close" type="button" aria-label="Close navigation" title="Close navigation" onClick={onCloseMobileNav}><X aria-hidden="true" /></button>
+      </header>
+
+      <div className="sidebar-primary">
+        <button className="new-chat-button" type="button" aria-label="New chat" title="New chat" onClick={() => navigate(onNewChat)}>
+          <SquarePen aria-hidden="true" />
+          <span>New chat</span>
+        </button>
+        <label className="sidebar-search">
+          <Search aria-hidden="true" />
+          <span className="sr-only">Search sessions</span>
+          <input value={query} onChange={(event) => setQuery(event.currentTarget.value)} placeholder="Search sessions" aria-label="Search sessions" />
+        </label>
+      </div>
+
+      <div className="sidebar-scroll">
+        <section className="sidebar-group" aria-labelledby="projects-heading">
+          <div className="sidebar-group-head">
+            <span id="projects-heading">Projects</span>
+            <button className="mini-icon-button" type="button" aria-label="New project" title="New project" onClick={() => setCreatingProject(true)}><Plus aria-hidden="true" /></button>
+          </div>
+          <div className="project-list">
+            {projects.map((project) => (
+              <div className={`sidebar-row project-row ${project.id === currentProjectId ? "active" : ""}`} key={project.id}>
+                <button className="sidebar-row-main" type="button" title={project.rootPath} onClick={() => navigate(() => onSelectProject(project.id))}>
+                  <span className="project-avatar" aria-hidden="true">{project.name.slice(0, 1).toUpperCase()}</span>
+                  <span className="sidebar-row-copy">
+                    <strong>{project.name}</strong>
+                    <small>{project.sessionCount} sessions</small>
+                  </span>
+                  <ChevronRight aria-hidden="true" />
+                </button>
+                <details className="row-menu">
+                  <summary aria-label={`Project actions for ${project.name}`} title="Project actions"><MoreHorizontal aria-hidden="true" /></summary>
+                  <div className="row-menu-popover">
+                    {editingProjectId === project.id ? (
+                      <form onSubmit={(event) => { event.preventDefault(); if (!editingProjectName.trim()) return; onRenameProject(project.id, editingProjectName.trim()); setEditingProjectId(undefined) }}>
+                        <input value={editingProjectName} autoFocus aria-label="Project name" onChange={(event) => setEditingProjectName(event.currentTarget.value)} />
+                        <button type="submit" aria-label="Save project name"><Check aria-hidden="true" /> Save</button>
+                      </form>
+                    ) : (
+                      <button type="button" onClick={() => { setEditingProjectId(project.id); setEditingProjectName(project.name) }}><Pencil aria-hidden="true" /> Rename</button>
+                    )}
+                    <button type="button" className="danger-menu-item" disabled={project.sessionCount > 0} title={project.sessionCount ? "Remove sessions first" : "Remove project metadata"} onClick={() => onRemoveProjectEntry(project.id)}><Trash2 aria-hidden="true" /> Remove</button>
                   </div>
+                </details>
+              </div>
+            ))}
+            {creatingProject ? (
+              <form className="project-create-form" onSubmit={(event) => { event.preventDefault(); submitProject() }}>
+                <input value={newProjectName} autoFocus placeholder="Project name" aria-label="Project name" onChange={(event) => setNewProjectName(event.currentTarget.value)} />
+                <div className="inline-field">
+                  <input value={newProjectRoot} placeholder="Workspace root (optional)" aria-label="Workspace root" onChange={(event) => setNewProjectRoot(event.currentTarget.value)} />
+                  {onBrowseFolder ? (
+                    <button type="button" onClick={async () => { const picked = await onBrowseFolder(); if (picked) setNewProjectRoot(picked) }}>Browse...</button>
+                  ) : null}
                 </div>
-              ) : confirmRemoveProjectId === project.id ? (
-                <div className="confirm-box">
-                  <span>Remove this empty project entry only. Files and folders stay on disk.</span>
-                  <div className="inline-actions">
-                    <button type="button" onClick={() => { onRemoveProjectEntry(project.id); setConfirmRemoveProjectId(undefined) }}>Remove</button>
-                    <button type="button" onClick={() => setConfirmRemoveProjectId(undefined)}>Cancel</button>
-                  </div>
-                </div>
-              ) : (
+                <span className="form-hint">Choose an existing local folder. Pixiu works in an isolated session copy; reviewed changes reach the folder only after Apply.</span>
                 <div className="inline-actions">
-                  <button type="button" onClick={() => startProjectRename(project)}>Rename</button>
-                  <button
-                    type="button"
-                    disabled={project.sessionCount > 0}
-                    title={project.sessionCount > 0 ? "Move or remove sessions before removing this project entry." : "Remove empty project metadata only."}
-                    onClick={() => setConfirmRemoveProjectId(project.id)}
-                  >
-                    Remove empty
-                  </button>
+                  <button type="submit">Create</button>
+                  <button type="button" onClick={() => { setCreatingProject(false); setNewProjectName(""); setNewProjectRoot("") }}>Cancel</button>
                 </div>
-              )}
-            </div>
-          ))}
-          {creatingProject ? (
-            <div className="project-card project-create-form">
-              <input value={newProjectName} autoFocus placeholder="Project name" onChange={(event) => setNewProjectName(event.currentTarget.value)} />
-              <div className="inline-field">
-                <input value={newProjectRoot} placeholder="Workspace root (absolute local folder), optional" onChange={(event) => setNewProjectRoot(event.currentTarget.value)} />
-                {onBrowseFolder ? (
-                  <button type="button" onClick={async () => { const picked = await onBrowseFolder(); if (picked) setNewProjectRoot(picked) }}>Browse…</button>
-                ) : null}
-              </div>
-              <span className="form-hint">Set an absolute path to an existing local folder to chat and work directly inside it (the agent reads/writes those real files). Leave blank to use the sandboxed Pixiu workspace. Removing a project later only removes metadata.</span>
-              <div className="inline-actions">
-                <button type="button" onClick={submitNewProject}>Create</button>
-                <button type="button" onClick={() => { setCreatingProject(false); setNewProjectName(""); setNewProjectRoot("") }}>Cancel</button>
-              </div>
-            </div>
-          ) : (
-            <button className="side-mini-action" type="button" onClick={() => setCreatingProject(true)}>New project</button>
-          )}
-        </div>
-        <div className="side-title">Sessions</div>
-        {sessionsLoading ? (
-          <div className="sidebar-empty">
-            <strong>Loading sessions</strong>
-            <span>Restoring recent Pixiu workbench sessions.</span>
+              </form>
+            ) : null}
           </div>
-        ) : sessionsError ? (
-          <div className="sidebar-empty error">
-            <strong>Session list failed</strong>
-            <span>{sessionsError}</span>
-          </div>
-        ) : !sessions.length ? (
-          <div className="sidebar-empty">
-            <strong>No sessions yet</strong>
-            <span>Create a New chat to start a Pixiu workbench session.</span>
-          </div>
-        ) : !filteredSessions.length ? (
-          <div className="sidebar-empty">
-            <strong>No sessions match your search.</strong>
-            <span>Try a different term or project.</span>
-          </div>
-        ) : (
+        </section>
+
+        <section className="sidebar-group sessions-group" aria-labelledby="sessions-heading">
+          <div className="sidebar-group-head"><span id="sessions-heading">Recent sessions</span><small>{filteredSessions.length}</small></div>
+          {sessionsLoading ? <div className="sidebar-empty">Loading sessions...</div> : null}
+          {sessionsError ? <div className="sidebar-empty error" role="alert">{sessionsError}</div> : null}
+          {!sessionsLoading && !sessionsError && !filteredSessions.length ? <div className="sidebar-empty">No sessions in this project.</div> : null}
           <div className="session-list">
             {filteredSessions.map((session) => (
-              <div className={`session-row ${session.id === sessionId ? "active" : ""}`} key={session.id}>
-                <button
-                  className="session"
-                  title={`${session.title ?? session.id}\n${session.cwd}`}
-                  onClick={() => { onOpenPanel("chat"); onLoadSession(session.id) }}
-                >
-                  <span className="session-name">{session.title ?? "Untitled chat"}</span>
-                  <span className="session-meta">{shortDate(session.updatedAt)}{session.workspaceDir ? ` · ${session.workspaceDir}` : ""}</span>
-                  <span className="session-context">{session.preview ?? (pathBasename(session.cwd) || session.cwd)}</span>
+              <div className={`sidebar-row session-row ${session.id === sessionId ? "active" : ""}`} key={session.id}>
+                <button className="sidebar-row-main session" type="button" title={`${session.title ?? session.id}\n${session.cwd}`} onClick={() => navigate(() => { onOpenPanel("chat"); onLoadSession(session.id) })}>
+                  <span className={`session-status session-status-${session.finishStatus ?? "idle"}`} aria-hidden="true" />
+                  <span className="sidebar-row-copy">
+                    <strong>{session.title ?? "Untitled chat"}</strong>
+                    <small>{shortDate(session.updatedAt)}{session.preview ? ` · ${session.preview}` : ""}</small>
+                  </span>
                 </button>
-                <div className="inline-actions session-actions">
-                  {editingSessionId === session.id ? (
-                    <>
-                      <input
-                        value={editingSessionTitle}
-                        autoFocus
-                        onChange={(event) => setEditingSessionTitle(event.currentTarget.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") submitSessionRename(session.id)
-                          if (event.key === "Escape") setEditingSessionId(undefined)
-                        }}
-                      />
-                      <button type="button" onClick={() => submitSessionRename(session.id)}>Save</button>
-                      <button type="button" onClick={() => setEditingSessionId(undefined)}>Cancel</button>
-                    </>
-                  ) : (
-                    <button type="button" onClick={() => startSessionRename(session)}>Rename</button>
-                  )}
-                  {projects.length > 1 ? (
-                    <select
-                      value={session.projectId ?? ""}
-                      title="Move to project"
-                      onChange={(event) => onMoveSession(session.id, event.currentTarget.value)}
-                    >
-                      {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-                    </select>
-                  ) : null}
-                  {confirmDeleteSessionId === session.id ? (
-                    <>
-                      <button type="button" onClick={() => { onRemoveSessionFromList(session.id); setConfirmDeleteSessionId(undefined) }}>Remove from list</button>
-                      <button type="button" onClick={() => setConfirmDeleteSessionId(undefined)}>Cancel</button>
-                    </>
-                  ) : (
-                    <button type="button" onClick={() => setConfirmDeleteSessionId(session.id)}>Remove</button>
-                  )}
-                </div>
+                <details className="row-menu">
+                  <summary aria-label={`Session actions for ${session.title ?? "Untitled chat"}`} title="Session actions"><MoreHorizontal aria-hidden="true" /></summary>
+                  <div className="row-menu-popover">
+                    {editingSessionId === session.id ? (
+                      <form onSubmit={(event) => { event.preventDefault(); if (!editingSessionTitle.trim()) return; onRenameSession(session.id, editingSessionTitle.trim()); setEditingSessionId(undefined) }}>
+                        <input value={editingSessionTitle} autoFocus aria-label="Session title" onChange={(event) => setEditingSessionTitle(event.currentTarget.value)} />
+                        <button type="submit"><Check aria-hidden="true" /> Save</button>
+                      </form>
+                    ) : (
+                      <button type="button" onClick={() => { setEditingSessionId(session.id); setEditingSessionTitle(session.title ?? "Untitled chat") }}><Pencil aria-hidden="true" /> Rename</button>
+                    )}
+                    {projects.length > 1 ? (
+                      <label className="move-session-label">Move to<select value={session.projectId ?? ""} onChange={(event) => onMoveSession(session.id, event.currentTarget.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
+                    ) : null}
+                    <button type="button" className="danger-menu-item" onClick={() => onRemoveSessionFromList(session.id)}><Trash2 aria-hidden="true" /> Remove from list</button>
+                  </div>
+                </details>
               </div>
             ))}
           </div>
-        )}
+        </section>
       </div>
-      <div className="sidebar-footer">
-        <div className="rail-avatar">P</div>
-        <div className="status-card">
-          <div className="status-row">
-            <span><span className={`dot ${providerReady ? "ok" : "warn"}`} />Provider</span>
-            <span>{providerReady ? "ready" : "missing key"}</span>
-          </div>
-          <div className="status-row">
-            <span>Workspace</span>
-            <span>{workspace ?? "loading"}</span>
-          </div>
-        </div>
-      </div>
+
+      <nav className="sidebar-footer" aria-label="Workbench sections">
+        <button className={activePanel === "workspace" ? "active" : ""} type="button" aria-label="Workspace" title={workspace ?? "Workspace"} onClick={() => navigate(() => onOpenPanel("workspace"))}><Files aria-hidden="true" /><span>Workspace</span></button>
+        <button className={activePanel === "skills" ? "active" : ""} type="button" aria-label="Skills" title="Skills" onClick={() => navigate(() => onOpenPanel("skills"))}><Puzzle aria-hidden="true" /><span>Skills</span><small>{skillCount}</small></button>
+        <button className={activePanel === "mcp" ? "active" : ""} type="button" aria-label="MCP" title="MCP" onClick={() => navigate(() => onOpenPanel("mcp"))}><Network aria-hidden="true" /><span>MCP</span><small>{status?.mcp?.connected ?? 0}/{status?.mcp?.configured ?? 0}</small></button>
+        <button className={activePanel === "projects" ? "active" : ""} type="button" aria-label="Projects" title="Projects" onClick={() => navigate(() => onOpenPanel("projects"))}><FolderGit2 aria-hidden="true" /><span>Projects</span></button>
+        <button className={activePanel === "settings" ? "active" : ""} type="button" aria-label="Settings" title="Settings" onClick={() => navigate(() => { onOpenPanel("settings"); onConfigureApi() })}><Settings aria-hidden="true" /><span>Settings</span><span className={`provider-dot ${providerReady ? "ok" : "warn"}`} /></button>
+      </nav>
     </aside>
   )
 }

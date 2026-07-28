@@ -1,11 +1,12 @@
 import { createID } from "../shared/id"
 import { PixiuError } from "../shared/errors"
 import type { TodoItem } from "../todo/types"
-import type { CreateSessionInput, SessionMessage, SessionRecord, SessionStore, SessionTodoState } from "./types"
+import type { CreateSessionInput, SessionMessage, SessionRecord, SessionStore, SessionTodoState, SessionTurn } from "./types"
 
 export class MemorySessionStore implements SessionStore {
   private readonly sessions = new Map<string, SessionRecord>()
   private readonly messages = new Map<string, SessionMessage[]>()
+  private readonly turns = new Map<string, SessionTurn[]>()
   private readonly todos = new Map<string, SessionTodoState>()
 
   async create(input: CreateSessionInput) {
@@ -20,6 +21,7 @@ export class MemorySessionStore implements SessionStore {
     if (input.metadata) session.metadata = input.metadata
     this.sessions.set(session.id, session)
     this.messages.set(session.id, [])
+    this.turns.set(session.id, [])
     this.todos.set(session.id, { todos: [] })
     return session
   }
@@ -34,6 +36,7 @@ export class MemorySessionStore implements SessionStore {
       createdAt: input.createdAt ?? new Date().toISOString(),
       parts: input.parts,
     }
+    if (input.turnId) message.turnId = input.turnId
     this.messages.get(input.sessionId)!.push(message)
     session.updatedAt = message.createdAt
     return message
@@ -45,6 +48,29 @@ export class MemorySessionStore implements SessionStore {
 
   async readMessages(sessionId: string) {
     return [...(this.messages.get(sessionId) ?? [])]
+  }
+
+  async createTurn(turn: SessionTurn) {
+    if (!this.sessions.has(turn.sessionId)) throw new PixiuError(`Unknown session: ${turn.sessionId}`, { code: "SESSION_NOT_FOUND" })
+    const turns = this.turns.get(turn.sessionId) ?? []
+    if (turns.some((item) => item.id === turn.id)) throw new PixiuError(`Turn already exists: ${turn.id}`, { code: "TURN_EXISTS" })
+    turns.push({ ...turn })
+    this.turns.set(turn.sessionId, turns)
+    return { ...turn }
+  }
+
+  async updateTurn(sessionId: string, turnId: string, patch: Partial<SessionTurn>) {
+    const turns = this.turns.get(sessionId) ?? []
+    const index = turns.findIndex((turn) => turn.id === turnId)
+    if (index < 0) throw new PixiuError(`Unknown turn: ${turnId}`, { code: "TURN_NOT_FOUND" })
+    const current = turns[index]!
+    const next = { ...current, ...patch, id: current.id, sessionId: current.sessionId, runId: current.runId }
+    turns[index] = next
+    return { ...next }
+  }
+
+  async readTurns(sessionId: string) {
+    return (this.turns.get(sessionId) ?? []).map((turn) => ({ ...turn }))
   }
 
   async getTodos(sessionId: string) {

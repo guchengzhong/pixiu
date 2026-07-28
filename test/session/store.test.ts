@@ -26,6 +26,45 @@ describe("session stores", () => {
     expect((await second.readMessages(session.id))[0]?.parts[0]).toEqual({ type: "text", text: "ok" })
   })
 
+  test("jsonl store persists turn updates and message ownership", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-session-turns-"))
+    const first = new JsonlSessionStore(root)
+    const session = await first.create({ cwd: process.cwd(), title: "turns" })
+    await first.createTurn({
+      id: "turn_1",
+      runId: "run_1",
+      sessionId: session.id,
+      model: "provider/model",
+      status: "running",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      retryCount: 0,
+    })
+    await first.appendMessage({
+      sessionId: session.id,
+      turnId: "turn_1",
+      role: "user",
+      parts: [{ type: "text", text: "owned by turn" }],
+    })
+    await first.updateTurn(session.id, "turn_1", {
+      status: "idle",
+      completedAt: "2026-01-01T00:00:01.000Z",
+      durationMs: 1_000,
+      inputTokens: 21,
+      outputTokens: 8,
+    })
+
+    const second = new JsonlSessionStore(root)
+    expect(await second.readTurns(session.id)).toEqual([expect.objectContaining({
+      id: "turn_1",
+      runId: "run_1",
+      status: "idle",
+      durationMs: 1_000,
+      inputTokens: 21,
+      outputTokens: 8,
+    })])
+    expect((await second.readMessages(session.id))[0]).toMatchObject({ turnId: "turn_1" })
+  })
+
   test("jsonl store persists todo state across reloads", async () => {
     const root = await mkdtemp(join(tmpdir(), "pixiu-session-todos-"))
     const first = new JsonlSessionStore(root)

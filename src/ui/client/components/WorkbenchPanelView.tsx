@@ -1,9 +1,11 @@
 import type { SessionEvidence } from "../../../session/evidence"
+import type { SessionTurn } from "../../../session/types"
 import { useState } from "react"
-import type { UiFileSummary } from "../../shared/api"
+import type { UiFileSummary, UiValidationRecord } from "../../shared/api"
 import { formatSize, pathBasename, shortDate } from "../helpers"
 import type {
   FilePreview,
+  FileReferenceRange,
   FileReferenceSource,
   StatusSummary,
   UiMcpServerSummary,
@@ -19,12 +21,15 @@ export function WorkbenchPanelView({
   panel,
   projects,
   currentProjectId,
+  sessionId,
   sessions,
   skills,
   mcpServers,
   files,
   preview,
   evidence,
+  turns,
+  validations,
   status,
   providerReady,
   onCreateProject,
@@ -38,6 +43,8 @@ export function WorkbenchPanelView({
   onMoveSession,
   onPreviewFile,
   onReferenceFile,
+  onValidationsChange,
+  onFixValidation,
   onConfigureApi,
   onRefresh,
   onBrowseFolder,
@@ -45,12 +52,15 @@ export function WorkbenchPanelView({
   panel: Exclude<WorkbenchPanel, "chat">
   projects: UiProjectSummary[]
   currentProjectId: string | undefined
+  sessionId: string | undefined
   sessions: UiSessionSummary[]
   skills: UiSkillSummary[]
   mcpServers: UiMcpServerSummary[]
   files: UiFileSummary[]
   preview: FilePreview | undefined
   evidence: SessionEvidence | undefined
+  turns: SessionTurn[]
+  validations: UiValidationRecord[]
   status: StatusSummary | undefined
   providerReady: boolean
   onCreateProject(input: { name: string; rootPath?: string }): void
@@ -63,7 +73,9 @@ export function WorkbenchPanelView({
   onRemoveSessionFromList(sessionId: string): void
   onMoveSession(sessionId: string, projectId: string): void
   onPreviewFile(file: UiFileSummary): void
-  onReferenceFile(file: UiFileSummary, source: FileReferenceSource): void
+  onReferenceFile(file: UiFileSummary, source: FileReferenceSource, range?: FileReferenceRange): void
+  onValidationsChange(validations: UiValidationRecord[]): void
+  onFixValidation(record: UiValidationRecord): void
   onConfigureApi(): void
   onRefresh(): void
   onBrowseFolder?(): Promise<string | undefined>
@@ -91,7 +103,19 @@ export function WorkbenchPanelView({
       {panel === "mcp" ? <McpPanel servers={mcpServers} onRefresh={onRefresh} /> : null}
       {panel === "workspace" ? (
         <PanelFrame title="Workspace" meta={status?.cwd ?? "Project workspace"} action={<button className="ghost" type="button" onClick={onRefresh}>Refresh</button>}>
-          <WorkspaceFiles files={files} preview={preview} evidence={evidence} onPreview={onPreviewFile} onReference={onReferenceFile} />
+          <WorkspaceFiles
+            sessionId={sessionId}
+            projectId={currentProjectId}
+            files={files}
+            preview={preview}
+            evidence={evidence}
+            turns={turns}
+            validations={validations}
+            onPreview={onPreviewFile}
+            onReference={onReferenceFile}
+            onValidationsChange={onValidationsChange}
+            onFixValidation={onFixValidation}
+          />
         </PanelFrame>
       ) : null}
       {panel === "settings" ? (

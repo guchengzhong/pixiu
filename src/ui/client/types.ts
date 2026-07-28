@@ -1,5 +1,6 @@
 import type { ActivityItem, RunStatus } from "../shared/api"
 import type { UiMcpServerSummary, UiProjectSummary, UiSkillSummary } from "../shared/api"
+import type { MessagePart, SessionTurn } from "../../session/types"
 
 export type TraceItem = {
   id: string
@@ -10,9 +11,32 @@ export type TraceItem = {
 }
 
 export type ChatMessage = {
+  id: string
+  turnId?: string
   role: "user" | "assistant"
   text: string
   pending?: boolean
+  createdAt?: string
+  parts?: MessagePart[]
+  attachments?: FileReference[]
+  tools?: TurnTool[]
+  artifacts?: TurnArtifact[]
+  turn?: SessionTurn
+}
+
+export type TurnTool = {
+  id: string
+  name: string
+  status: "running" | "success" | "failed"
+  detail?: string
+}
+
+export type TurnArtifact = {
+  kind: "artifact" | "source"
+  tool: string
+  label: string
+  path?: string
+  url?: string
 }
 
 export type FileReferenceSource = "uploaded" | "workspace" | "generated" | "evidence"
@@ -24,7 +48,11 @@ export type FileReference = {
   status: "uploaded" | "ready" | "referenced"
   size?: number
   kind?: "text" | "binary"
+  startLine?: number
+  endLine?: number
 }
+
+export type FileReferenceRange = Pick<FileReference, "startLine" | "endLine">
 
 export type FilePreview = {
   path: string
@@ -35,6 +63,9 @@ export type FilePreview = {
 
 export type PermissionView = {
   id: string
+  sessionId?: string
+  submitting?: boolean
+  error?: string
   request: {
     tool?: string
     input?: unknown
@@ -46,7 +77,7 @@ export type PermissionView = {
   }
 }
 
-export type InspectorTab = "activity" | "files" | "evidence" | "status" | "api"
+export type InspectorTab = "activity" | "changes" | "files"
 
 export type WorkbenchPanel = "chat" | "projects" | "skills" | "mcp" | "workspace" | "settings"
 

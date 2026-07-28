@@ -1,5 +1,5 @@
 export { runCli } from "./cli/index"
-export { defaultConfig, type PixiuConfig } from "./config/defaults"
+export { defaultConfig, type PixiuConfig, type ProjectCommands } from "./config/defaults"
 export { loadConfig, validateConfig } from "./config/loader"
 export { PixiuError, formatError } from "./shared/errors"
 export { createID } from "./shared/id"

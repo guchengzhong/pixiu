@@ -154,7 +154,7 @@ describe("scenario harness", () => {
   })
 
   test("keeps concurrent run workspaces isolated", async () => {
-    await withPixiuFixture(async ({ llm, projectDir, run }) => {
+    await withPixiuFixture(async ({ llm, workspaceDir, run }) => {
       const afterToolWith = (value: string): Match => (hit) => requestHasToolResult()(hit) && requestBodyIncludes(value)(hit)
 
       llm.tool("write", { path: "same.md", content: "alpha-content-001" }, { match: requestBodyIncludes("parallel alpha") })
@@ -173,8 +173,8 @@ describe("scenario harness", () => {
       const twoSession = sessionIdFrom(parseJsonEvents(two.stdout))
 
       expect(oneSession).not.toBe(twoSession)
-      expect(await readFile(join(projectDir, "workspace", oneSession, "same.md"), "utf8")).toBe("alpha-content-001")
-      expect(await readFile(join(projectDir, "workspace", twoSession, "same.md"), "utf8")).toBe("beta-content-002")
+      expect(await readFile(join(await workspaceDir(oneSession), "same.md"), "utf8")).toBe("alpha-content-001")
+      expect(await readFile(join(await workspaceDir(twoSession), "same.md"), "utf8")).toBe("beta-content-002")
     })
   })
 })

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 
@@ -8,6 +8,23 @@ import { createFakeLLMServer } from "../harness/llm-server"
 
 async function json(response: Response) {
   return await response.json() as any
+}
+
+async function runGit(root: string, ...args: string[]) {
+  const child = Bun.spawn({
+    cmd: ["git", ...args],
+    cwd: root,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ])
+  if (exitCode !== 0) throw new Error(`git ${args.join(" ")} failed: ${stderr}`)
+  return stdout
 }
 
 async function sse(response: Response) {
@@ -412,8 +429,12 @@ describe("ui server", () => {
     }
   })
 
-  test("creates an empty chat session with a workspace", async () => {
+  test("creates an empty chat session with an external isolated workspace", async () => {
     const root = await mkdtemp(join(tmpdir(), "pixiu-ui-create-session-"))
+    const external = await mkdtemp(join(tmpdir(), "pixiu-ui-create-session-external-"))
+    await mkdir(join(root, "workspace/session_legacy/.venv/bin"), { recursive: true })
+    await writeFile(join(external, "python"), "external interpreter\n", "utf8")
+    await symlink(join(external, "python"), join(root, "workspace/session_legacy/.venv/bin/python"))
     const ui = await createUiServer({ cwd: root, token: "test-token" })
     try {
       const response = await ui.fetch("http://127.0.0.1/api/sessions", {
@@ -426,9 +447,11 @@ describe("ui server", () => {
       expect(response.status).toBe(200)
       expect(body.data.session).toMatchObject({
         title: "Browser chat",
-        workspaceDir: expect.stringContaining("workspace/session_"),
+        workspaceDir: expect.any(String),
       })
       expect(body.data.session.id).toStartWith("session_")
+      expect(body.data.session.cwd.startsWith(root)).toBe(false)
+      expect(body.data.session.cwd.endsWith("/work")).toBe(true)
       expect(body.data.files).toEqual([])
     } finally {
       await ui.close()
@@ -516,23 +539,124 @@ describe("ui server", () => {
       expect(second.data.answer).toBe("second answer")
       expect(second.data.status).toBe("idle")
 
-      // The persisted history must be free of interleaving/orphans: no assistant message
-      // may declare a tool_call, and there is exactly one assistant answer ("second").
       const detail = await json(await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}`, {
         headers: { authorization: "Bearer test-token" },
       }))
-      const assistants = detail.data.messages.filter((m: any) => m.role === "assistant")
+      const assistants = detail.data.messages.filter((message: any) => message.role === "assistant")
       expect(assistants.length).toBe(1)
-      expect(assistants[0].parts.some((p: any) => p.type === "tool_call")).toBe(false)
+      expect(assistants[0].parts.some((part: any) => part.type === "tool_call")).toBe(false)
     } finally {
       await ui.close()
       await llm.close()
     }
   })
 
-  test("session in a project with a local rootPath runs inside that folder", async () => {
+  test("finishes a web run while waiting for required user action", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-user-action-"))
+    const llm = await createFakeLLMServer()
+    llm.tool("request_user_action", {
+      title: "请完成小红书登录",
+      reason: "浏览器页面需要用户登录后才能继续。",
+      category: "auth",
+      instructions: ["在已打开的浏览器中完成登录。", "回到 Pixiu 后回复继续。"],
+      resumeHint: "完成登录后回复继续。",
+    })
+    await writeFile(join(root, "pixiu.jsonc"), JSON.stringify({
+      model: "fake/model",
+      providers: {
+        "openai-compatible": { baseURL: llm.url, apiKey: "sk-test", model: "fake/model" },
+      },
+    }), "utf8")
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const response = await ui.fetch("http://127.0.0.1/api/runs?wait=1", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ message: "查看小红书", permissionMode: "acceptEdits" }),
+      })
+      const body = await json(response)
+
+      expect(response.status).toBe(200)
+      expect(body.data).toMatchObject({ status: "idle", finishReason: "user_action_required" })
+      expect(body.data.answer).toContain("请完成小红书登录")
+      expect(body.data.answer).toContain("完成登录后回复继续")
+      expect(llm.calls()).toBe(1)
+      const existing = await json(await ui.fetch(`http://127.0.0.1/api/runs/${body.data.runId}`, {
+        headers: { authorization: "Bearer test-token" },
+      }))
+      const missing = await json(await ui.fetch("http://127.0.0.1/api/runs/run_missing", {
+        headers: { authorization: "Bearer test-token" },
+      }))
+      expect(existing.data).toEqual({ found: true, status: "idle" })
+      expect(missing.data).toEqual({ found: false })
+    } finally {
+      await ui.close()
+      await llm.close()
+    }
+  })
+
+  test("persists per-turn usage and retries with a different model", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-turn-retry-"))
+    const llm = await createFakeLLMServer()
+    llm.text("FINAL: first", { usage: { input: 120, output: 9 } })
+    llm.text("FINAL: second", { usage: { input: 150, output: 12 } })
+    await writeFile(join(root, "pixiu.jsonc"), JSON.stringify({
+      model: "first/model",
+      providers: {
+        "openai-compatible": { baseURL: llm.url, apiKey: "sk-test", model: "first/model" },
+      },
+    }), "utf8")
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const created = await json(await ui.fetch("http://127.0.0.1/api/sessions", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ title: "Retry metrics" }),
+      }))
+      const sessionId = created.data.session.id
+      const first = await json(await ui.fetch("http://127.0.0.1/api/runs?wait=1", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ message: "try", sessionId, permissionMode: "acceptEdits" }),
+      }))
+      const second = await json(await ui.fetch("http://127.0.0.1/api/runs?wait=1", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({
+          message: "try",
+          sessionId,
+          permissionMode: "acceptEdits",
+          model: "second/model",
+          retryOf: first.data.turnId,
+        }),
+      }))
+      const detail = await json(await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}`, {
+        headers: { authorization: "Bearer test-token" },
+      }))
+
+      expect(first.data).toMatchObject({ model: "first/model", inputTokens: 120, outputTokens: 9, retryCount: 0 })
+      expect(second.data).toMatchObject({
+        model: "second/model",
+        inputTokens: 150,
+        outputTokens: 12,
+        retryCount: 1,
+        retryOf: first.data.turnId,
+      })
+      expect(detail.data.turns).toEqual([
+        expect.objectContaining({ id: first.data.turnId, model: "first/model", inputTokens: 120, outputTokens: 9, retryCount: 0 }),
+        expect.objectContaining({ id: second.data.turnId, model: "second/model", retryOf: first.data.turnId, retryCount: 1 }),
+      ])
+      expect((llm.inputs()[1] as any).model).toBe("second/model")
+    } finally {
+      await ui.close()
+      await llm.close()
+    }
+  })
+
+  test("session in a project with a local rootPath uses an isolated copy of that folder", async () => {
     const root = await mkdtemp(join(tmpdir(), "pixiu-ui-root-"))
     const workdir = await mkdtemp(join(tmpdir(), "pixiu-ui-workdir-"))
+    await writeFile(join(workdir, "existing.txt"), "from project", "utf8")
     const ui = await createUiServer({ cwd: root, token: "test-token" })
     try {
       const project = await json(await ui.fetch("http://127.0.0.1/api/projects", {
@@ -545,13 +669,15 @@ describe("ui server", () => {
         headers: { authorization: "Bearer test-token", "content-type": "application/json" },
         body: JSON.stringify({ title: "in folder", projectId: project.data.project.id }),
       }))
-      expect(resolve(session.data.session.cwd)).toBe(resolve(workdir))
+      expect(resolve(session.data.session.cwd)).not.toBe(resolve(workdir))
+      expect(session.data.session.cwd.endsWith("/work")).toBe(true)
+      expect(await readFile(join(session.data.session.cwd, "existing.txt"), "utf8")).toBe("from project")
     } finally {
       await ui.close()
     }
   })
 
-  test("a session in a rooted project writes into the real folder", async () => {
+  test("a rooted project receives agent changes only after review and apply", async () => {
     const root = await mkdtemp(join(tmpdir(), "pixiu-ui-root2-"))
     const workdir = await mkdtemp(join(tmpdir(), "pixiu-ui-workdir2-"))
     const llm = await createFakeLLMServer()
@@ -583,8 +709,51 @@ describe("ui server", () => {
         body: JSON.stringify({ message: "write a note", sessionId: session.data.session.id, permissionMode: "acceptEdits" }),
       }))
       expect(run.data.answer).toBe("wrote note")
-      const written = await readFile(join(workdir, "note.md"), "utf8")
-      expect(written).toBe("# hello real folder")
+      expect(await Bun.file(join(workdir, "note.md")).exists()).toBe(false)
+      expect(await readFile(join(session.data.session.cwd, "note.md"), "utf8")).toBe("# hello real folder")
+
+      const changes = await json(await ui.fetch(`http://127.0.0.1/api/sessions/${session.data.session.id}/changes`, {
+        headers: { authorization: "Bearer test-token" },
+      }))
+      const applied = await ui.fetch(`http://127.0.0.1/api/sessions/${session.data.session.id}/changes/apply`, {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ revision: changes.data.revision, selections: [{ path: "note.md" }] }),
+      })
+      expect(applied.status).toBe(200)
+      expect(await readFile(join(workdir, "note.md"), "utf8")).toBe("# hello real folder")
+    } finally {
+      await ui.close()
+      await llm.close()
+    }
+  })
+
+  test("resumes SSE after the last received event id without replay duplicates", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-sse-cursor-"))
+    const llm = await createFakeLLMServer()
+    llm.text("FINAL: cursor")
+    await writeFile(join(root, "pixiu.jsonc"), JSON.stringify({
+      model: "fake/model",
+      providers: { "openai-compatible": { baseURL: llm.url, apiKey: "sk-test", model: "fake/model" } },
+    }), "utf8")
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const run = await json(await ui.fetch("http://127.0.0.1/api/runs?wait=1", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ message: "cursor", permissionMode: "acceptEdits" }),
+      }))
+      const first = await (await ui.fetch(`http://127.0.0.1/api/runs/${run.data.runId}/events?token=test-token`)).text()
+      const ids = [...first.matchAll(/^id: (\d+)$/gm)].map((match) => Number(match[1]))
+      const cursor = ids.at(-2)
+      expect(cursor).toBeDefined()
+      const resumed = await (await ui.fetch(`http://127.0.0.1/api/runs/${run.data.runId}/events?token=test-token`, {
+        headers: { "last-event-id": String(cursor) },
+      })).text()
+
+      expect((resumed.match(/^id: /gm) ?? [])).toHaveLength(1)
+      expect(resumed).toContain("event: result")
+      expect(resumed).not.toContain("event: agent_event")
     } finally {
       await ui.close()
       await llm.close()
@@ -922,6 +1091,8 @@ describe("ui server", () => {
         body: JSON.stringify({ message: "write report", permissionMode: "acceptEdits" }),
       })
       const body = await json(response)
+      const persistedSessionId = body.data.sessionId
+      const persistedTurnId = body.data.turnId
       const detail = await json(await ui.fetch(`http://127.0.0.1/api/sessions/${body.data.sessionId}`, {
         headers: { authorization: "Bearer test-token" },
       }))
@@ -931,6 +1102,26 @@ describe("ui server", () => {
 
       expect(response.status).toBe(200)
       expect(body.data.answer).toBe("wrote report")
+      expect(body.data).toMatchObject({
+        turnId: expect.any(String),
+        model: "fake/model",
+        startedAt: expect.any(String),
+        completedAt: expect.any(String),
+        durationMs: expect.any(Number),
+        retryCount: 0,
+      })
+      expect(detail.data.turns).toContainEqual(expect.objectContaining({
+        id: body.data.turnId,
+        runId: body.data.runId,
+        sessionId: body.data.sessionId,
+        model: "fake/model",
+        status: "idle",
+        durationMs: expect.any(Number),
+      }))
+      expect(detail.data.messages.length).toBeGreaterThan(1)
+      expect(detail.data.messages.map((message: any) => message.turnId)).toEqual(
+        detail.data.messages.map(() => body.data.turnId),
+      )
       expect(detail.data.activity).toContainEqual(expect.objectContaining({
         kind: "file",
         status: "success",
@@ -943,6 +1134,87 @@ describe("ui server", () => {
       }))
       expect(detail.data.evidence.artifacts).toContainEqual(expect.objectContaining({ tool: "write", path: "report.md" }))
       expect(preview.data.content).toContain("# Report")
+
+      const rollbackResponse = await ui.fetch(
+        `http://127.0.0.1/api/sessions/${persistedSessionId}/turns/${persistedTurnId}/rollback`,
+        { method: "POST", headers: { authorization: "Bearer test-token", "content-type": "application/json" }, body: "{}" },
+      )
+      const rollback = await json(rollbackResponse)
+      expect(rollback).toEqual(expect.objectContaining({ ok: true }))
+      expect(rollbackResponse.status).toBe(200)
+      expect(rollback.data).toMatchObject({
+        turnId: persistedTurnId,
+        checkpointId: expect.any(String),
+        changes: { available: true, changes: [] },
+      })
+      expect(await Bun.file(join(detail.data.session.cwd, "report.md")).exists()).toBe(false)
+    } finally {
+      await ui.close()
+      await llm.close()
+    }
+  })
+
+  test("resolves validated line references into turn-scoped model context", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-file-reference-"))
+    const llm = await createFakeLLMServer()
+    llm.text("FINAL: reviewed range")
+    await writeFile(join(root, "pixiu.jsonc"), JSON.stringify({
+      model: "fake/model",
+      providers: {
+        "openai-compatible": { baseURL: llm.url, apiKey: "sk-test", model: "fake/model" },
+      },
+    }), "utf8")
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const created = await json(await ui.fetch("http://127.0.0.1/api/sessions", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ title: "References" }),
+      }))
+      const sessionId = created.data.session.id
+      await mkdir(join(created.data.session.cwd, "src"), { recursive: true })
+      await writeFile(join(created.data.session.cwd, "src/example.ts"), [
+        "const one = 1",
+        "const two = 2",
+        "const three = 3",
+        "const four = 4",
+      ].join("\n"), "utf8")
+
+      const result = await json(await ui.fetch("http://127.0.0.1/api/runs?wait=1", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({
+          message: "Review this",
+          sessionId,
+          permissionMode: "acceptEdits",
+          references: [{ path: "src/example.ts", source: "workspace", startLine: 2, endLine: 3 }],
+        }),
+      }))
+      const detail = await json(await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}`, {
+        headers: { authorization: "Bearer test-token" },
+      }))
+      const modelMessages = llm.inputs()[0]?.messages as Array<{ role: string; content: string }>
+      const modelUser = modelMessages.slice().reverse().find((message) => message.role === "user")?.content ?? ""
+
+      expect(result.data.status).toBe("idle")
+      expect(modelUser).toContain("[Referenced file: @src/example.ts:2-3]")
+      expect(modelUser).toContain("const two = 2\nconst three = 3")
+      expect(modelUser).not.toContain("const one = 1")
+      expect(modelUser).not.toContain("const four = 4")
+      expect(detail.data.messages[0]).toMatchObject({
+        turnId: result.data.turnId,
+        parts: [
+          { type: "text", text: "Review this" },
+          {
+            type: "file_reference",
+            path: "src/example.ts",
+            source: "workspace",
+            startLine: 2,
+            endLine: 3,
+            content: "const two = 2\nconst three = 3",
+          },
+        ],
+      })
     } finally {
       await ui.close()
       await llm.close()
@@ -976,7 +1248,7 @@ describe("ui server", () => {
         body: JSON.stringify({ title: "Read activity" }),
       }))
       const sessionId = created.data.session.id
-      await writeFile(join(root, created.data.session.workspaceDir, "note.txt"), "hello activity", "utf8")
+      await writeFile(join(created.data.session.cwd, "note.txt"), "hello activity", "utf8")
       const start = await ui.fetch("http://127.0.0.1/api/runs", {
         method: "POST",
         headers: { authorization: "Bearer test-token", "content-type": "application/json" },
@@ -1197,6 +1469,394 @@ describe("ui server", () => {
     }
   })
 
+  test("returns a project file tree with branch and structured Git changes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-workspace-git-"))
+    await mkdir(join(root, "src"), { recursive: true })
+    await mkdir(join(root, ".tools/bun/bin"), { recursive: true })
+    await mkdir(join(root, ".venv/bin"), { recursive: true })
+    await mkdir(join(root, "workspace/session_old"), { recursive: true })
+    await writeFile(join(root, "src/main.ts"), "export const value = 1\n", "utf8")
+    await writeFile(join(root, "README.md"), "initial\n", "utf8")
+    await writeFile(join(root, ".tools/bun/bin/bunx"), "local tool cache\n", "utf8")
+    await writeFile(join(root, ".venv/bin/python"), "local virtual environment\n", "utf8")
+    await writeFile(join(root, "workspace/session_old/result.txt"), "legacy session\n", "utf8")
+    await runGit(root, "init")
+    await runGit(root, "checkout", "-b", "main")
+    await runGit(root, "add", "README.md", "src/main.ts")
+    await runGit(root, "-c", "user.name=Pixiu Test", "-c", "user.email=pixiu@example.test", "commit", "-m", "initial")
+    await runGit(root, "mv", "README.md", "GUIDE.md")
+    await writeFile(join(root, "src/main.ts"), "export const value = 2\n", "utf8")
+    await writeFile(join(root, "new file.md"), "untracked\n", "utf8")
+
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const response = await ui.fetch("http://127.0.0.1/api/workspace", {
+        headers: { authorization: "Bearer test-token" },
+      })
+      const body = await json(response)
+      const changes = new Map(body.data.git.changedFiles.map((file: any) => [file.path, file]))
+
+      expect(response.status).toBe(200)
+      expect(body.data).toMatchObject({
+        available: true,
+        projectId: "project_default",
+        rootPath: root,
+        truncated: false,
+        git: { available: true, branch: "main" },
+      })
+      expect(body.data.entries).toContainEqual(expect.objectContaining({
+        path: "src",
+        parentPath: ".",
+        type: "directory",
+      }))
+      expect(body.data.entries).toContainEqual(expect.objectContaining({
+        path: "src/main.ts",
+        parentPath: "src",
+        type: "file",
+        kind: "text",
+        gitStatus: "modified",
+      }))
+      expect(body.data.entries.some((entry: any) => entry.path === ".tools" || entry.path.startsWith(".tools/"))).toBe(false)
+      expect(body.data.entries.some((entry: any) => entry.path === ".venv" || entry.path.startsWith(".venv/"))).toBe(false)
+      expect(body.data.entries.some((entry: any) => entry.path === "workspace" || entry.path.startsWith("workspace/"))).toBe(false)
+      expect(body.data.git.changedFiles.some((file: any) => file.path === "workspace" || file.path.startsWith("workspace/"))).toBe(false)
+      expect(changes.get("src/main.ts")).toMatchObject({ status: "modified", indexStatus: " ", workingTreeStatus: "M" })
+      expect(changes.get("new file.md")).toMatchObject({ status: "untracked", indexStatus: "?", workingTreeStatus: "?" })
+      expect(changes.get("GUIDE.md")).toMatchObject({ status: "renamed", originalPath: "README.md", indexStatus: "R" })
+    } finally {
+      await ui.close()
+    }
+  })
+
+  test("returns revisioned session changes from the isolated work copy", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-session-changes-"))
+    await mkdir(join(root, "src"), { recursive: true })
+    await writeFile(join(root, "src/main.ts"), "one\ntwo\nthree\n", "utf8")
+    await writeFile(join(root, "pwd"), "must-not-copy", { mode: 0o600 })
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const created = await json(await ui.fetch("http://127.0.0.1/api/sessions", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ title: "Review changes" }),
+      }))
+      const session = created.data.session
+      await writeFile(join(session.cwd, "src/main.ts"), "one\nTWO\nthree\n", "utf8")
+      await writeFile(join(session.cwd, "src/new.ts"), "export const added = true\n", "utf8")
+
+      const changes = await json(await ui.fetch(`http://127.0.0.1/api/sessions/${session.id}/changes`, {
+        headers: { authorization: "Bearer test-token" },
+      }))
+      const diff = await json(await ui.fetch(`http://127.0.0.1/api/sessions/${session.id}/changes/diff?path=${encodeURIComponent("src/main.ts")}`, {
+        headers: { authorization: "Bearer test-token" },
+      }))
+
+      expect(changes.data).toMatchObject({
+        available: true,
+        sessionId: session.id,
+        projectRoot: root,
+        revision: expect.any(String),
+        baseRevision: expect.any(String),
+        workRevision: expect.any(String),
+        changes: expect.arrayContaining([
+          expect.objectContaining({ path: "src/main.ts", status: "modified", hunkCount: 1, additions: 1, deletions: 1 }),
+          expect.objectContaining({ path: "src/new.ts", status: "added", additions: 1 }),
+        ]),
+      })
+      expect(diff.data).toMatchObject({
+        available: true,
+        path: "src/main.ts",
+        revision: changes.data.revision,
+        hunks: [expect.objectContaining({ id: expect.any(String), oldStart: 1, newStart: 1 })],
+      })
+      expect(diff.data.content).toContain("-two\n+TWO")
+      expect(await readFile(join(root, "src/main.ts"), "utf8")).toBe("one\ntwo\nthree\n")
+      expect(await Bun.file(join(session.cwd, "pwd")).exists()).toBe(false)
+    } finally {
+      await ui.close()
+    }
+  })
+
+  test("applies and discards selected hunks, stages and commits files, and undoes the last apply", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-change-actions-"))
+    const original = ["alpha", "keep-a", "keep-b", "keep-c", "keep-d", "keep-e", "keep-f", "keep-g", "keep-h", "omega", ""].join("\n")
+    const changed = ["ALPHA", "keep-a", "keep-b", "keep-c", "keep-d", "keep-e", "keep-f", "keep-g", "keep-h", "OMEGA", ""].join("\n")
+    await writeFile(join(root, "notes.txt"), original, "utf8")
+    await runGit(root, "init")
+    await runGit(root, "config", "user.name", "Pixiu Test")
+    await runGit(root, "config", "user.email", "pixiu@example.test")
+    await runGit(root, "add", "notes.txt")
+    await runGit(root, "commit", "-m", "initial")
+
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const headers = { authorization: "Bearer test-token", "content-type": "application/json" }
+      const created = await json(await ui.fetch("http://127.0.0.1/api/sessions", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ title: "Change actions" }),
+      }))
+      const sessionId = created.data.session.id as string
+      const workRoot = created.data.session.cwd as string
+      await writeFile(join(workRoot, "notes.txt"), changed, "utf8")
+
+      const initialChanges = await json(await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}/changes`, { headers }))
+      const initialRevision = initialChanges.data.revision as string
+      const diff = await json(await ui.fetch(
+        `http://127.0.0.1/api/sessions/${sessionId}/changes/diff?path=notes.txt`,
+        { headers },
+      ))
+      expect(diff.data.hunks).toHaveLength(2)
+      const firstHunkId = diff.data.hunks[0].id as string
+      const secondHunkId = diff.data.hunks[1].id as string
+
+      const appliedResponse = await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}/changes/apply`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ revision: initialRevision, selections: [{ path: "notes.txt", hunkIds: [firstHunkId] }] }),
+      })
+      const applied = await json(appliedResponse)
+      expect(appliedResponse.status).toBe(200)
+      expect(applied.data.operation).toMatchObject({ action: "apply", paths: ["notes.txt"] })
+      expect(applied.data.changes).toMatchObject({ canUndo: true })
+      expect(applied.data.changes.changes[0]).toMatchObject({ applied: true, appliedHunkIds: [firstHunkId], staged: false })
+      expect(await readFile(join(root, "notes.txt"), "utf8")).toBe(changed.replace("OMEGA", "omega"))
+
+      const unappliedStageResponse = await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}/changes/stage`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ revision: initialRevision, selections: [{ path: "notes.txt", hunkIds: [secondHunkId] }] }),
+      })
+      expect(unappliedStageResponse.status).toBe(409)
+      expect(await json(unappliedStageResponse)).toMatchObject({ ok: false, code: "WORKSPACE_CHANGE_NOT_APPLIED" })
+
+      const stagedResponse = await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}/changes/stage`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ revision: initialRevision, selections: [{ path: "notes.txt", hunkIds: [firstHunkId] }] }),
+      })
+      const staged = await json(stagedResponse)
+      expect(stagedResponse.status).toBe(200)
+      expect(staged.data.operation).toMatchObject({
+        action: "stage",
+        paths: ["notes.txt"],
+        selections: [{ path: "notes.txt", hunkIds: [firstHunkId] }],
+      })
+      expect(staged.data.changes.changes[0]).toMatchObject({ staged: true, committed: false })
+      expect(await runGit(root, "show", ":notes.txt")).toBe(changed.replace("OMEGA", "omega"))
+
+      const unstagedResponse = await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}/changes/unstage`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ revision: initialRevision, selections: [{ path: "notes.txt", hunkIds: [firstHunkId] }] }),
+      })
+      const unstaged = await json(unstagedResponse)
+      expect(unstagedResponse.status).toBe(200)
+      expect(unstaged.data.operation).toMatchObject({
+        action: "unstage",
+        selections: [{ path: "notes.txt", hunkIds: [firstHunkId] }],
+      })
+      expect(await runGit(root, "show", ":notes.txt")).toBe(original)
+
+      const restagedResponse = await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}/changes/stage`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ revision: initialRevision, selections: [{ path: "notes.txt", hunkIds: [firstHunkId] }] }),
+      })
+      expect(restagedResponse.status).toBe(200)
+
+      const committedResponse = await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}/changes/commit`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ revision: initialRevision, message: "Apply first Pixiu hunk" }),
+      })
+      const committed = await json(committedResponse)
+      expect(committedResponse.status).toBe(200)
+      expect(committed.data.operation).toMatchObject({ action: "commit", commit: expect.any(String) })
+      expect(committed.data.changes.changes[0]).toMatchObject({ staged: false, committed: true })
+      expect(await runGit(root, "show", "HEAD:notes.txt")).toBe(changed.replace("OMEGA", "omega"))
+
+      const undoneResponse = await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}/changes/undo`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ revision: initialRevision }),
+      })
+      const undone = await json(undoneResponse)
+      expect(undoneResponse.status).toBe(200)
+      expect(undone.data.operation).toMatchObject({ action: "undo", paths: ["notes.txt"] })
+      expect(undone.data.changes).toMatchObject({ canUndo: false })
+      expect(await readFile(join(root, "notes.txt"), "utf8")).toBe(original)
+
+      const discardedResponse = await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}/changes/discard`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ revision: initialRevision, selections: [{ path: "notes.txt", hunkIds: [secondHunkId] }] }),
+      })
+      const discarded = await json(discardedResponse)
+      expect(discardedResponse.status).toBe(200)
+      expect(discarded.data.operation).toMatchObject({ action: "discard", paths: ["notes.txt"] })
+      expect(await readFile(join(workRoot, "notes.txt"), "utf8")).toBe(changed.replace("OMEGA", "omega"))
+
+      const staleResponse = await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}/changes/apply`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ revision: initialRevision, selections: [{ path: "notes.txt" }] }),
+      })
+      const stale = await json(staleResponse)
+      expect(staleResponse.status).toBe(409)
+      expect(stale).toMatchObject({ ok: false, code: "WORKSPACE_CHANGE_STALE" })
+    } finally {
+      await ui.close()
+    }
+  })
+
+  test("runs preset and confirmed custom validations bound to a real turn and current revision", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-validations-"))
+    await writeFile(join(root, "pixiu.jsonc"), JSON.stringify({
+      project: { commands: { test: "test -f marker.txt && printf validation-ok" } },
+    }), "utf8")
+    await writeFile(join(root, "marker.txt"), "ready\n", "utf8")
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const headers = { authorization: "Bearer test-token", "content-type": "application/json" }
+      const created = await json(await ui.fetch("http://127.0.0.1/api/sessions", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ title: "Validation binding" }),
+      }))
+      const sessionId = created.data.session.id as string
+      const turnId = "turn_validation"
+      const runtimeModule = await import("../../src/runtime/build")
+      const runtime = await runtimeModule.buildRuntime({ cwd: root, loadLLM: false })
+      try {
+        await runtime.sessions.createTurn({
+          id: turnId,
+          runId: "run_validation",
+          sessionId,
+          model: "fake/model",
+          status: "idle",
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          durationMs: 1,
+          retryCount: 0,
+        })
+      } finally {
+        await runtime.close()
+      }
+
+      const changes = await json(await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}/changes`, { headers }))
+      const revision = changes.data.revision as string
+      const presetResponse = await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}/validations`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ turnId, kind: "test" }),
+      })
+      const preset = await json(presetResponse)
+      expect(presetResponse.status).toBe(200)
+      expect(preset.data.record).toMatchObject({
+        sessionId,
+        turnId,
+        revision,
+        kind: "test",
+        command: "test -f marker.txt && printf validation-ok",
+        status: "passed",
+        timedOut: false,
+      })
+      expect(preset.data.record.output).toContain("validation-ok")
+
+      const unconfirmedResponse = await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}/validations`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ turnId, kind: "custom", command: "exit 3" }),
+      })
+      const unconfirmed = await json(unconfirmedResponse)
+      expect(unconfirmedResponse.status).toBe(400)
+      expect(unconfirmed).toMatchObject({ ok: false, code: "WORKSPACE_VALIDATION_CONFIRMATION_REQUIRED" })
+
+      const customResponse = await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}/validations`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ turnId, kind: "custom", command: "printf custom-failed; exit 3", confirmed: true }),
+      })
+      const custom = await json(customResponse)
+      expect(customResponse.status).toBe(200)
+      expect(custom.data.record).toMatchObject({ turnId, revision, kind: "custom", status: "failed", exitCode: 3 })
+      expect(custom.data.record.output).toContain("custom-failed")
+
+      const detail = await json(await ui.fetch(`http://127.0.0.1/api/sessions/${sessionId}`, { headers }))
+      expect(detail.data.validations).toHaveLength(2)
+      expect(detail.data.validations.map((record: any) => record.turnId)).toEqual([turnId, turnId])
+      expect(detail.data.validations.map((record: any) => record.revision)).toEqual([revision, revision])
+    } finally {
+      await ui.close()
+    }
+  })
+
+  test("previews and diffs project files without interpreting paths as commands", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-workspace-diff-"))
+    await writeFile(join(root, "tracked.ts"), "const value = 1\n", "utf8")
+    await writeFile(join(root, "deleted.ts"), "const deleted = true\n", "utf8")
+    await runGit(root, "init")
+    await runGit(root, "add", "tracked.ts", "deleted.ts")
+    await runGit(root, "-c", "user.name=Pixiu Test", "-c", "user.email=pixiu@example.test", "commit", "-m", "initial")
+    await runGit(root, "rm", "deleted.ts")
+    await writeFile(join(root, "tracked.ts"), "const value = 2\n", "utf8")
+    await writeFile(join(root, "odd;name.ts"), "const odd = true\n", "utf8")
+    await writeFile(join(root, ":(glob)*.ts"), "const literal = true\n", "utf8")
+
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const headers = { authorization: "Bearer test-token" }
+      const preview = await json(await ui.fetch("http://127.0.0.1/api/workspace/content?path=tracked.ts", { headers }))
+      const diff = await json(await ui.fetch("http://127.0.0.1/api/workspace/diff?path=tracked.ts", { headers }))
+      const oddDiff = await json(await ui.fetch(`http://127.0.0.1/api/workspace/diff?path=${encodeURIComponent("odd;name.ts")}`, { headers }))
+      const literalDiff = await json(await ui.fetch(`http://127.0.0.1/api/workspace/diff?path=${encodeURIComponent(":(glob)*.ts")}`, { headers }))
+      const deletedDiff = await json(await ui.fetch("http://127.0.0.1/api/workspace/diff?path=deleted.ts", { headers }))
+
+      expect(preview.data).toMatchObject({ path: "tracked.ts", content: "const value = 2\n" })
+      expect(diff.data).toMatchObject({ path: "tracked.ts", available: true, status: "modified" })
+      expect(diff.data.content).toContain("-const value = 1")
+      expect(diff.data.content).toContain("+const value = 2")
+      expect(oddDiff.data).toMatchObject({ path: "odd;name.ts", available: true, status: "untracked" })
+      expect(oddDiff.data.content).toContain("+const odd = true")
+      expect(literalDiff.data).toMatchObject({ path: ":(glob)*.ts", available: true, status: "untracked" })
+      expect(literalDiff.data.content).toContain("+const literal = true")
+      expect(deletedDiff.data).toMatchObject({ path: "deleted.ts", available: true, status: "deleted" })
+      expect(deletedDiff.data.content).toContain("-const deleted = true")
+    } finally {
+      await ui.close()
+    }
+  })
+
+  test("degrades outside Git and rejects traversal and symlink escapes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-workspace-plain-"))
+    const outside = await mkdtemp(join(tmpdir(), "pixiu-ui-workspace-outside-"))
+    await writeFile(join(root, "note.txt"), "plain workspace\n", "utf8")
+    await writeFile(join(outside, "outside.txt"), "outside\n", "utf8")
+    await symlink(join(outside, "outside.txt"), join(root, "linked.txt"))
+
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const headers = { authorization: "Bearer test-token" }
+      const workspace = await json(await ui.fetch("http://127.0.0.1/api/workspace", { headers }))
+      const diff = await json(await ui.fetch("http://127.0.0.1/api/workspace/diff?path=note.txt", { headers }))
+      const traversalResponse = await ui.fetch("http://127.0.0.1/api/workspace/content?path=..%2Foutside.txt", { headers })
+      const traversal = await json(traversalResponse)
+      const symlinkResponse = await ui.fetch("http://127.0.0.1/api/workspace/content?path=linked.txt", { headers })
+      const symlinkBody = await json(symlinkResponse)
+
+      expect(workspace.data.git).toMatchObject({ available: false, reason: "not_repository", changedFiles: [] })
+      expect(workspace.data.entries).toContainEqual(expect.objectContaining({ path: "linked.txt", type: "symlink" }))
+      expect(diff.data).toMatchObject({ available: false, reason: "not_repository", content: "" })
+      expect(traversalResponse.status).toBe(400)
+      expect(traversal).toMatchObject({ ok: false, code: "PATH_OUTSIDE_WORKSPACE" })
+      expect(symlinkResponse.status).toBe(400)
+      expect(symlinkBody).toMatchObject({ ok: false, code: "PATH_OUTSIDE_WORKSPACE" })
+    } finally {
+      await ui.close()
+    }
+  })
+
   test("uploads, lists, and previews session workspace files", async () => {
     const root = await mkdtemp(join(tmpdir(), "pixiu-ui-files-"))
     const ui = await createUiServer({ cwd: root, token: "test-token" })
@@ -1333,6 +1993,104 @@ describe("ui server", () => {
     }
   })
 
+  test("rejects session file previews through symlinks outside the workspace", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-file-symlink-"))
+    const outside = await mkdtemp(join(tmpdir(), "pixiu-ui-file-symlink-outside-"))
+    const sessionRoot = join(root, "workspace/session_symlink")
+    await mkdir(sessionRoot, { recursive: true })
+    await writeFile(join(outside, "secret.txt"), "OUTSIDE_SENTINEL", "utf8")
+    await symlink(join(outside, "secret.txt"), join(sessionRoot, "leak.txt"))
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const runtime = await import("../../src/runtime/build")
+      const built = await runtime.buildRuntime({ cwd: root, loadLLM: false })
+      try {
+        await built.sessions.create({ id: "session_symlink", cwd: sessionRoot, title: "Symlink" })
+      } finally {
+        await built.close()
+      }
+
+      const response = await ui.fetch("http://127.0.0.1/api/sessions/session_symlink/files/content?path=leak.txt", {
+        headers: { authorization: "Bearer test-token" },
+      })
+      const body = await json(response)
+
+      expect(response.status).toBe(400)
+      expect(body).toMatchObject({ ok: false, code: "PATH_OUTSIDE_WORKSPACE" })
+      expect(JSON.stringify(body)).not.toContain("OUTSIDE_SENTINEL")
+    } finally {
+      await ui.close()
+    }
+  })
+
+  test("rejects session uploads through symlinks outside the workspace", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-upload-symlink-"))
+    const outside = await mkdtemp(join(tmpdir(), "pixiu-ui-upload-symlink-outside-"))
+    const sessionRoot = join(root, "workspace/session_upload_symlink")
+    await mkdir(sessionRoot, { recursive: true })
+    await symlink(outside, join(sessionRoot, "uploads"))
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const runtime = await import("../../src/runtime/build")
+      const built = await runtime.buildRuntime({ cwd: root, loadLLM: false })
+      try {
+        await built.sessions.create({ id: "session_upload_symlink", cwd: sessionRoot, title: "Upload symlink" })
+      } finally {
+        await built.close()
+      }
+
+      const form = new FormData()
+      form.append("files", new File(["must stay inside"], "notes.md", { type: "text/markdown" }))
+      const response = await ui.fetch("http://127.0.0.1/api/sessions/session_upload_symlink/uploads", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token" },
+        body: form,
+      })
+      const body = await json(response)
+
+      expect(response.status).toBe(400)
+      expect(body).toMatchObject({ ok: false, code: "PATH_OUTSIDE_WORKSPACE" })
+      await expect(readFile(join(outside, "notes.md"), "utf8")).rejects.toThrow()
+    } finally {
+      await ui.close()
+    }
+  })
+
+  test("rejects an upload target that is a symlink outside the workspace", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-upload-target-symlink-"))
+    const outside = await mkdtemp(join(tmpdir(), "pixiu-ui-upload-target-outside-"))
+    const sessionRoot = join(root, "workspace/session_upload_target")
+    await mkdir(join(sessionRoot, "uploads"), { recursive: true })
+    const outsideFile = join(outside, "secret.md")
+    await writeFile(outsideFile, "ORIGINAL_OUTSIDE_CONTENT", "utf8")
+    await symlink(outsideFile, join(sessionRoot, "uploads/notes.md"))
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const runtime = await import("../../src/runtime/build")
+      const built = await runtime.buildRuntime({ cwd: root, loadLLM: false })
+      try {
+        await built.sessions.create({ id: "session_upload_target", cwd: sessionRoot, title: "Upload target" })
+      } finally {
+        await built.close()
+      }
+
+      const form = new FormData()
+      form.append("files", new File(["replacement"], "notes.md", { type: "text/markdown" }))
+      const response = await ui.fetch("http://127.0.0.1/api/sessions/session_upload_target/uploads", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token" },
+        body: form,
+      })
+      const body = await json(response)
+
+      expect(response.status).toBe(400)
+      expect(body).toMatchObject({ ok: false, code: "PATH_OUTSIDE_WORKSPACE" })
+      expect(await readFile(outsideFile, "utf8")).toBe("ORIGINAL_OUTSIDE_CONTENT")
+    } finally {
+      await ui.close()
+    }
+  })
+
   test("streams permission requests and resumes after approval", async () => {
     const root = await mkdtemp(join(tmpdir(), "pixiu-ui-permission-"))
     const llm = await createFakeLLMServer()
@@ -1383,6 +2141,72 @@ describe("ui server", () => {
       expect(all).toContain("Permission approved")
       expect(all).toContain('"status":"running"')
       expect(all).toContain("shell approved")
+    } finally {
+      await ui.close()
+      await llm.close()
+    }
+  })
+
+  test("replays pending permission requests to late SSE subscribers", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-ui-permission-replay-"))
+    const llm = await createFakeLLMServer()
+    llm.tool("shell", { command: "printf permission-replay" })
+    llm.text("FINAL: replay approved")
+    await writeFile(
+      join(root, "pixiu.jsonc"),
+      JSON.stringify({
+        model: "fake/model",
+        providers: {
+          "openai-compatible": {
+            baseURL: llm.url,
+            apiKey: "sk-test",
+            model: "fake/model",
+          },
+        },
+      }),
+      "utf8",
+    )
+    const ui = await createUiServer({ cwd: root, token: "test-token" })
+    try {
+      const started = await json(await ui.fetch("http://127.0.0.1/api/runs", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ message: "replay shell permission", permissionMode: "default" }),
+      }))
+      await llm.wait(1)
+      await Bun.sleep(30)
+
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 1_000)
+      const stream = await ui.fetch(`http://127.0.0.1/api/runs/${started.data.runId}/events?token=test-token`, {
+        signal: controller.signal,
+      })
+      const partial = await readUntil(stream, "event: permission_request")
+      clearTimeout(timeout)
+      const permission = partial.text.match(/event: permission_request\ndata: ([^\n]+)/)?.[1]
+      const data = permission ? JSON.parse(permission) : undefined
+      const permissionId = data?.id
+
+      expect(partial.text).toContain('"status":"waiting_for_permission"')
+      expect(permissionId).toStartWith("perm_")
+      expect(data).toMatchObject({
+        runId: started.data.runId,
+        request: { tool: "shell", input: { command: "printf permission-replay" } },
+        decision: { action: "ask" },
+      })
+      expect(typeof data.similarityKey).toBe("string")
+
+      const approval = await ui.fetch(`http://127.0.0.1/api/permissions/${permissionId}`, {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ action: "allow", scope: "once" }),
+      })
+      const approvalBody = await json(approval)
+      expect(approval.status, JSON.stringify(approvalBody)).toBe(200)
+      const all = await partial.rest
+
+      expect(all).toContain("permission_result")
+      expect(all).toContain("replay approved")
     } finally {
       await ui.close()
       await llm.close()

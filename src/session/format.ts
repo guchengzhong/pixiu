@@ -62,7 +62,13 @@ export function toLLMMessages(messages: SessionMessage[]): LLMMessage[] {
 
 function textFromParts(parts: MessagePart[]) {
   return parts
-    .filter((part) => part.type === "text" || part.type === "reasoning" || part.type === "error")
-    .map((part) => ("text" in part ? part.text : part.message))
+    .filter((part) => part.type === "text" || part.type === "reasoning" || part.type === "error" || part.type === "file_reference")
+    .map((part) => {
+      if (part.type === "file_reference") {
+        const range = part.startLine === undefined ? "" : `:${part.startLine}-${part.endLine ?? part.startLine}`
+        return `[Referenced file: @${part.path}${range}]\n${part.content}\n[End referenced file]`
+      }
+      return "text" in part ? part.text : part.message
+    })
     .join("\n")
 }

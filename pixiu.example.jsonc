@@ -1,6 +1,13 @@
 {
   "$schema": "./schema/pixiu.schema.json",
   "model": "openai-compatible/example-model",
+  "project": {
+    "commands": {
+      "test": "bun run test",
+      "typecheck": "bun run typecheck",
+      "build": "bun run ui:build"
+    }
+  },
   "providers": {
     "openai-compatible": {
       "baseURL": "https://api.example.com/v1",
@@ -10,7 +17,7 @@
   "agents": {
     "default": {
       "description": "Default coding and research agent.",
-      "tools": ["read", "grep", "glob", "web_search", "web_fetch", "shell", "write", "edit", "patch", "todo", "skill_search", "skill"],
+      "tools": ["read", "grep", "glob", "web_search", "web_fetch", "shell", "write", "edit", "patch", "todo", "request_user_action", "skill_search", "skill"],
       "maxSteps": 20
     }
   },

@@ -13,6 +13,8 @@ describe("runCli", () => {
     expect(result.exitCode).toBe(0)
     expect(result.output).toContain("Usage:")
     expect(result.output).toContain("Agent commands:")
+    expect(result.output).toContain("pixiu init")
+    expect(result.output).toContain("Project setup:")
     expect(result.output).toContain("Common options:")
     expect(result.output).toContain("pixiu run [-c|--continue] <message>")
     expect(result.output).toContain("--permission-mode")

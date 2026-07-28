@@ -1,18 +1,179 @@
 import type { KeyboardEvent } from "react"
 
 import type { AgentEvent } from "../../agent/events"
-import type { MessagePart, SessionMessage } from "../../session/types"
+import type { SessionEvidence } from "../../session/evidence"
+import type { MessagePart, SessionMessage, SessionTurn } from "../../session/types"
 import { ENDPOINTS } from "./constants"
-import type { TraceItem } from "./types"
+import type { ChatMessage, FileReference, FileReferenceSource, TraceItem, TurnArtifact, TurnTool } from "./types"
 
-export function sessionMessages(messages: SessionMessage[]) {
-  const result: Array<{ role: "user" | "assistant"; text: string }> = []
+export function sessionMessages(messages: SessionMessage[], evidence?: SessionEvidence, turns: SessionTurn[] = []) {
+  const result: ChatMessage[] = []
+  let assistant: ChatMessage | undefined
+  const artifactsByMessage = turnArtifactsByMessage(evidence)
+  const turnsById = new Map(turns.map((turn) => [turn.id, turn]))
+
+  function ensureAssistant(seed: SessionMessage): ChatMessage {
+    if (!assistant) {
+      const turn = seed.turnId ? turnsById.get(seed.turnId) : undefined
+      assistant = {
+        id: `turn_${seed.id}`,
+        ...(seed.turnId ? { turnId: seed.turnId } : {}),
+        ...(turn ? { turn } : {}),
+        role: "assistant",
+        text: "",
+        createdAt: seed.createdAt,
+        parts: [],
+        tools: [],
+        artifacts: [],
+      }
+    }
+    return assistant
+  }
+
+  function flushAssistant() {
+    if (!assistant) return
+    if (assistant.text || assistant.tools?.length || assistant.artifacts?.length) result.push(assistant)
+    assistant = undefined
+  }
+
   for (const message of messages) {
-    if (message.role !== "user" && message.role !== "assistant") continue
-    const text = textFromParts(message.parts)
-    if (text) result.push({ role: message.role, text })
+    if (message.role === "system") continue
+    if (message.role === "user") {
+      flushAssistant()
+      const parsed = splitFileReferences(textFromParts(message.parts))
+      const structured = message.parts
+        .filter((part): part is Extract<MessagePart, { type: "file_reference" }> => part.type === "file_reference")
+        .map((part) => ({
+          path: part.path,
+          name: fileNameFromPath(part.path),
+          source: part.source ?? "workspace",
+          status: part.source === "uploaded" ? "uploaded" as const : "referenced" as const,
+          ...(part.startLine !== undefined ? { startLine: part.startLine } : {}),
+          ...(part.endLine !== undefined ? { endLine: part.endLine } : {}),
+        }))
+      const attachments = uniqueFileReferences([...parsed.attachments, ...structured])
+      result.push({
+        id: message.id,
+        ...(message.turnId ? { turnId: message.turnId } : {}),
+        role: "user",
+        text: parsed.text,
+        createdAt: message.createdAt,
+        parts: message.parts.filter((part) => part.type !== "file_reference"),
+        ...(attachments.length ? { attachments } : {}),
+      })
+      continue
+    }
+
+    const target = ensureAssistant(message)
+    target.parts = [...(target.parts ?? []), ...message.parts]
+    for (const part of message.parts) {
+      if (part.type === "text" && part.text.trim()) {
+        target.text = [target.text, part.text.trim()].filter(Boolean).join("\n\n")
+      }
+      if (part.type === "tool_call") {
+        target.tools = upsertTurnTool(target.tools ?? [], {
+          id: part.id,
+          name: part.name,
+          status: "running",
+          detail: JSON.stringify(part.input, null, 2),
+        })
+      }
+      if (part.type === "tool_result") {
+        const value = asToolResult(part)
+        target.tools = upsertTurnTool(target.tools ?? [], {
+          id: part.toolCallId,
+          name: part.name,
+          status: value.ok === false ? "failed" : "success",
+          detail: toolResultDetail(part.result),
+        })
+      }
+      if (part.type === "error") {
+        target.text = [target.text, `Error: ${part.message}`].filter(Boolean).join("\n\n")
+      }
+    }
+    const turnArtifacts = artifactsByMessage.get(message.id)
+    if (turnArtifacts?.length) target.artifacts = uniqueTurnArtifacts([...(target.artifacts ?? []), ...turnArtifacts])
+  }
+  flushAssistant()
+  return result
+}
+
+export function splitFileReferences(text: string): { text: string; attachments: FileReference[] } {
+  const match = text.match(/(?:^|\n\n)Referenced files:\n((?:- .+(?:\n|$))*)$/)
+  if (!match || match.index === undefined) return { text, attachments: [] }
+  const block = match[1]
+  if (!block) return { text, attachments: [] }
+  const attachments: FileReference[] = []
+  for (const line of block.trim().split(/\r?\n/)) {
+    const item = line.match(/^- (.+) \((uploaded|workspace|generated|evidence)\)$/)
+    if (!item?.[1] || !item[2]) return { text, attachments: [] }
+    const spec = item[1]
+    const range = spec.match(/^(.*):(\d+)-(\d+)$/)
+    const path = range?.[1] ?? spec
+    const startLine = range?.[2] ? Number(range[2]) : undefined
+    const endLine = range?.[3] ? Number(range[3]) : undefined
+    attachments.push({
+      path,
+      name: fileNameFromPath(path),
+      source: item[2] as FileReferenceSource,
+      status: item[2] === "uploaded" ? "uploaded" : "referenced",
+      ...(startLine !== undefined ? { startLine } : {}),
+      ...(endLine !== undefined ? { endLine } : {}),
+    })
+  }
+  return { text: text.slice(0, match.index).trim(), attachments }
+}
+
+function uniqueFileReferences(items: FileReference[]) {
+  const seen = new Set<string>()
+  return items.filter((item) => {
+    const key = `${item.source}:${item.path}:${item.startLine ?? ""}:${item.endLine ?? ""}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function turnArtifactsByMessage(evidence: SessionEvidence | undefined) {
+  const result = new Map<string, TurnArtifact[]>()
+  if (!evidence) return result
+  for (const artifact of evidence.artifacts) {
+    const current = result.get(artifact.messageId) ?? []
+    current.push({ kind: "artifact", tool: artifact.tool, label: artifact.path, path: artifact.path })
+    result.set(artifact.messageId, current)
+  }
+  for (const source of evidence.sources) {
+    const current = result.get(source.messageId) ?? []
+    current.push({
+      kind: "source",
+      tool: source.tool,
+      label: source.title ?? source.url ?? source.query ?? "Source",
+      ...(source.url ? { url: source.url } : {}),
+    })
+    result.set(source.messageId, current)
   }
   return result
+}
+
+function uniqueTurnArtifacts(items: TurnArtifact[]) {
+  const seen = new Set<string>()
+  return items.filter((item) => {
+    const key = `${item.kind}:${item.path ?? item.url ?? item.label}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function upsertTurnTool(items: TurnTool[], next: TurnTool) {
+  const index = items.findIndex((item) => item.id === next.id)
+  if (index < 0) return [...items, next]
+  return items.map((item, itemIndex) => itemIndex === index ? { ...item, ...next } : item)
+}
+
+function toolResultDetail(value: Extract<MessagePart, { type: "tool_result" }>["result"]) {
+  if (typeof value === "string") return value
+  return JSON.stringify(value, null, 2)
 }
 
 export function traceFromMessages(messages: SessionMessage[]): TraceItem[] {
@@ -43,11 +204,15 @@ export function textFromParts(parts: MessagePart[]) {
 }
 
 export function maybeSend(event: KeyboardEvent<HTMLTextAreaElement>, send: () => Promise<void>) {
-  if (event.key === "Enter" && !event.shiftKey) {
+  if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
     event.preventDefault()
     return send()
   }
   return undefined
+}
+
+export function isNearScrollEnd(input: { scrollHeight: number; scrollTop: number; clientHeight: number }, threshold = 96) {
+  return input.scrollHeight - input.scrollTop - input.clientHeight <= threshold
 }
 
 export function presetForBaseURL(value: string | undefined): keyof typeof ENDPOINTS | "custom" {
@@ -117,6 +282,10 @@ export function streamDisconnectMessage(fallbackFailure?: string) {
     fallbackFailure ||
     "与运行事件流的连接中断，且多次重连未恢复。任务可能仍在后台完成——请查看右侧 Activity 面板了解最后执行的步骤，或稍后重新打开该会话。"
   )
+}
+
+export function staleRunMessage(fallbackFailure?: string) {
+  return fallbackFailure || "Run stopped because the local Pixiu service restarted. Send a new message to continue."
 }
 
 export function failureMessageFromRunErrorEvent(event: Event) {

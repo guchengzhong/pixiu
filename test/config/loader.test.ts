@@ -9,6 +9,7 @@ describe("config loader", () => {
   test("loads defaults without config file", async () => {
     const root = await mkdtemp(join(tmpdir(), "pixiu-config-"))
     const config = await loadConfig({ cwd: root })
+    expect(config.project.commands).toEqual({})
     expect(config.agents.default?.maxSteps).toBeGreaterThan(0)
     expect(config.ui.accentColor).toBe("#3B8EEA")
     expect(config.sandbox.envAllowlist).toEqual(
@@ -27,6 +28,16 @@ describe("config loader", () => {
     await writeFile(join(root, "pixiu.jsonc"), `{"ui":{"accentColor":"#065880"}}`, "utf8")
     const config = await loadConfig({ cwd: root })
     expect(config.ui.accentColor).toBe("#065880")
+  })
+
+  test("loads and validates project verification commands", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pixiu-config-project-"))
+    await writeFile(join(root, "pixiu.jsonc"), `{"project":{"commands":{"test":"bun run test"}}}`, "utf8")
+    const config = await loadConfig({ cwd: root })
+    expect(config.project.commands).toEqual({ test: "bun run test" })
+
+    await writeFile(join(root, "pixiu.jsonc"), `{"project":{"commands":{"build":""}}}`, "utf8")
+    await expect(loadConfig({ cwd: root })).rejects.toThrow("config.project.commands.build")
   })
 
   test("loads legacy minicode config when pixiu config is absent", async () => {

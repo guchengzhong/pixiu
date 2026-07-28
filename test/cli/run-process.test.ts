@@ -113,7 +113,7 @@ describe("pixiu run subprocess", () => {
   })
 
   test("permission-mode acceptEdits allows writes without --yes", async () => {
-    await withPixiuFixture(async ({ llm, projectDir, exec }) => {
+    await withPixiuFixture(async ({ llm, workspaceDir, exec }) => {
       llm.tool("write", { path: "accepted.md", content: "accepted" })
       llm.text("FINAL: accepted")
 
@@ -122,13 +122,13 @@ describe("pixiu run subprocess", () => {
       expectExit(result, 0)
       const events = parseJsonEvents(result.stdout)
       const sessionId = sessionIdFrom(events)
-      expect(await readFile(join(projectDir, "workspace", sessionId, "accepted.md"), "utf8")).toBe("accepted")
+      expect(await readFile(join(await workspaceDir(sessionId), "accepted.md"), "utf8")).toBe("accepted")
       expect(events.some((event) => event.type === "tool_result" && event.name === "write" && event.ok)).toBe(true)
     })
   })
 
   test("permission-mode plan denies write tools", async () => {
-    await withPixiuFixture(async ({ llm, projectDir, exec }) => {
+    await withPixiuFixture(async ({ llm, workspaceDir, exec }) => {
       llm.tool("write", { path: "plan.md", content: "should not write" })
       llm.text("FINAL: planned only")
 
@@ -137,7 +137,7 @@ describe("pixiu run subprocess", () => {
       expectExit(result, 3)
       const events = parseJsonEvents(result.stdout)
       const sessionId = sessionIdFrom(events)
-      expect(await exists(join(projectDir, "workspace", sessionId, "plan.md"))).toBe(false)
+      expect(await exists(join(await workspaceDir(sessionId), "plan.md"))).toBe(false)
       expect(
         events.some(
           (event) =>
@@ -176,7 +176,7 @@ describe("pixiu run subprocess", () => {
   })
 
   test("writes files inside the session workspace", async () => {
-    await withPixiuFixture(async ({ llm, projectDir, run }) => {
+    await withPixiuFixture(async ({ llm, projectDir, workspaceDir, run }) => {
       llm.tool("write", { path: "hello.md", content: "workspace ok" }, { splitArgs: true })
       llm.text("FINAL: wrote hello.md")
 
@@ -185,7 +185,7 @@ describe("pixiu run subprocess", () => {
       expectExit(result, 0)
       const events = parseJsonEvents(result.stdout)
       const sessionId = sessionIdFrom(events)
-      const workspaceFile = join(projectDir, "workspace", sessionId, "hello.md")
+      const workspaceFile = join(await workspaceDir(sessionId), "hello.md")
       const projectFile = join(projectDir, "hello.md")
 
       expect(await readFile(workspaceFile, "utf8")).toBe("workspace ok")

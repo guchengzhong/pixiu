@@ -68,11 +68,27 @@ pixiu config set sandbox.shellTimeoutMs 30000
 Use `pixiu ui` when you want the browser workspace:
 
 ```bash
+pixiu init
 pixiu ui
 pixiu ui --port 2208 --no-open
+bun run src/cli/index.ts ui --port 2208 --no-open
 ```
 
-The browser UI is local-first: it binds to `127.0.0.1` by default and requires the token printed in the URL for API calls. It lets you configure and test an OpenAI-compatible provider, create or resume sessions, upload files into the session workspace, approve or deny permission prompts, cancel runs, preview text artifacts, copy workspace-relative paths, and inspect trace/evidence/status panels.
+Run the commands from the project directory you want Pixiu to use. `pixiu init` creates a minimal config without overwriting `pixiu.jsonc` or `minicode.jsonc`, and detects Test, Typecheck, and Build commands. The browser UI and terminal CLI then share that project configuration and session store.
+
+The UI binds to `127.0.0.1:2208` by default. `pixiu ui` opens the browser automatically; `--no-open` leaves the server in the foreground and prints the URL. Open the complete URL, including `?token=...`. The random token authorizes the local API for that server process and changes when the server restarts. Stop it with `Ctrl-C`.
+
+On first browser launch, select the project, configure the Provider, and complete the connection test. The setup cannot be dismissed until the connection succeeds. The browser workbench then includes project and session navigation, a Markdown/GFM conversation view, code highlighting and copy controls, uploads, run cancellation, permission prompts, model selection, tool activity, turn-scoped artifacts, and a resizable Inspector for workspace files, changes, previews, diffs, evidence, and status. Tablet and mobile layouts use keyboard-accessible drawers. New browser runs default to `acceptEdits`; select another permission mode in the composer when needed.
+
+Each new browser session runs in an isolated persistent workspace under the user's XDG state directory. The real project is not edited until reviewed files or hunks are selected in **Inspector -> Changes** and applied. From the same panel you can discard session changes, undo the latest apply, stage reviewed files or individual hunks, and commit them. A revision token prevents actions against a diff that changed after review.
+
+The Changes panel can run configured Tests, Typecheck, Build, or a custom command after explicit confirmation. Validation results include output, exit code, duration, timeout state, and the exact workspace revision. They are stored against the corresponding assistant turn, and a failed result can start a repair turn with **Ask Pixiu to fix**.
+
+Use **Add to prompt** from the file view for a complete file. Start/End inputs add only a selected range. Composer labels use `@path` or `@path:start-end` syntax and can be removed before sending.
+
+Assistant turns retain model, elapsed time, input/output token counts, failure details, retry count, and a pre-turn workspace checkpoint. Retry with the current model, switch models while preserving context, or restore the files to their state before the turn. Event stream reconnects resume after the last received event.
+
+Pixiu is locally hosted rather than a SaaS web app. Keep the loopback binding for normal use. For remote access, prefer an SSH tunnel to `127.0.0.1:2208`; do not expose the unencrypted token-protected HTTP service directly to the internet with `--host 0.0.0.0`.
 
 Provider setup in the browser supports endpoint aliases (`siliconflow`, `openai`, `deepseek`), custom base URLs, plaintext API keys, or API key environment variable names. Plaintext keys are written to project-local `pixiu.jsonc`; use the env-var mode if you do not want secrets in the project config.
 

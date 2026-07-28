@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto"
-import { access, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises"
+import { access, lstat, mkdir, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 
 import { approximateTokens } from "../../agent/compaction"
 import {
@@ -21,10 +21,32 @@ import { buildRuntime, type Runtime, type RuntimeWithoutLLM } from "../../runtim
 import { formatError, PixiuError } from "../../shared/errors"
 import { readJsoncFile } from "../../shared/json"
 import type { JsonObject, JsonValue } from "../../shared/json"
-import type { ProjectRecord, SessionMessage, SessionRecord } from "../../session/types"
+import type { ProjectRecord, SessionFileReference, SessionMessage, SessionRecord } from "../../session/types"
 import { DEFAULT_PROJECT_ID } from "../../session/projects"
 import { collectSessionEvidence } from "../../session/evidence"
-import { apiFailure, apiSuccess, type ApiFailure, type UiConfigResponse, type UiProjectSummary, type UiProviderSummary, type UiSessionSummary, type UiStatus } from "../shared/api"
+import {
+  apiFailure,
+  apiSuccess,
+  type ApiFailure,
+  type UiConfigResponse,
+  type UiProjectSummary,
+  type UiPromptFileReference,
+  type UiProviderSummary,
+  type UiSessionSummary,
+  type UiStatus,
+  type UiWorkspaceChangedFile,
+  type UiWorkspaceChangeStatus,
+  type UiWorkspaceDiff,
+  type UiWorkspaceEntry,
+  type UiWorkspaceGitSummary,
+  type UiWorkspaceSnapshot,
+  type UiChangeSetDiff,
+  type UiChangeMutationResult,
+  type UiChangeOperation,
+  type UiChangeSelection,
+  type UiChangeSetSnapshot,
+  type UiValidationRecord,
+} from "../shared/api"
 import type { PermissionDecision, PermissionMode, PermissionRequest } from "../../permission/types"
 import type { AgentEvent } from "../../agent/events"
 import { PathGuard, isInside } from "../../sandbox/path"
@@ -40,6 +62,33 @@ import {
   type RunStatusPhase,
   type TerminalRunStatus,
 } from "../../run/status"
+import {
+  createSessionWorkspaceBinding,
+  loadSessionWorkspaceBinding,
+  resolveSessionWorkspaceStateRoot,
+  sessionWorkspaceProjectExcludePaths,
+  type SessionWorkspaceBinding,
+} from "../../workspace/session"
+import {
+  structuredWorkspaceDiff,
+  type StructuredWorkspaceDiff,
+  type StructuredWorkspaceFileDiff,
+  type WorkspaceDiffHunk,
+} from "../../workspace/diff"
+import { createWorkspaceCheckpoint, restoreWorkspaceCheckpoint } from "../../workspace/checkpoint"
+import {
+  applySessionWorkspaceChanges,
+  assertSessionWorkspaceSelectionsApplied,
+  discardSessionWorkspaceChanges,
+  readSessionWorkspaceApplyState,
+  undoLastSessionWorkspaceApply,
+  type SessionWorkspaceChangeOperation,
+} from "../../workspace/apply"
+import {
+  listWorkspaceValidationRecords,
+  runWorkspaceValidation,
+  type WorkspaceValidationRecord,
+} from "../../workspace/validation"
 
 export const DEFAULT_UI_HOST = "127.0.0.1"
 export const DEFAULT_UI_PORT = 2208
@@ -56,6 +105,13 @@ const MAX_SESSION_UPLOAD_BYTES = 100 * 1024 * 1024
 // common proxy/browser idle windows so a run that is silent (e.g. a long tool call) does
 // not get its event stream dropped.
 const SSE_HEARTBEAT_MS = 15_000
+const MAX_WORKSPACE_ENTRIES = 2_000
+const MAX_WORKSPACE_PREVIEW_BYTES = 512 * 1024
+const MAX_PROMPT_REFERENCE_BYTES = 512 * 1024
+const MAX_PROMPT_REFERENCES = 20
+const MAX_GIT_STATUS_BYTES = 2 * 1024 * 1024
+const MAX_GIT_DIFF_BYTES = 1024 * 1024
+const GIT_TIMEOUT_MS = 8_000
 const PROVIDER_ENDPOINT_ALIASES: Record<string, string> = {
   openai: "https://api.openai.com/v1",
   siliconflow: "https://api.siliconflow.cn/v1",
@@ -93,6 +149,7 @@ type UiServerContext = {
   // message sequence (duplicate/orphaned tool_calls) and make subsequent LLM requests
   // structurally illegal, which the provider rejects wholesale.
   sessionRunTail: Map<string, Promise<unknown>>
+  workspaceMutations: Map<string, Promise<void>>
 }
 
 type ProviderConfigInput = {
@@ -107,6 +164,9 @@ type RunInput = {
   message?: unknown
   sessionId?: unknown
   permissionMode?: unknown
+  model?: unknown
+  retryOf?: unknown
+  references?: unknown
 }
 
 type SessionCreateInput = {
@@ -132,6 +192,23 @@ type SessionMoveInput = {
   projectId?: unknown
 }
 
+type ChangeMutationInput = {
+  revision?: unknown
+  selections?: unknown
+}
+
+type ChangeCommitInput = {
+  revision?: unknown
+  message?: unknown
+}
+
+type ValidationInput = {
+  turnId?: unknown
+  kind?: unknown
+  command?: unknown
+  confirmed?: unknown
+}
+
 type UiFileSummary = {
   path: string
   size: number
@@ -143,24 +220,45 @@ type Server = ReturnType<typeof Bun.serve>
 
 type UiRunRecord = {
   id: string
+  turnId: string
   input: {
     message: string
     sessionId?: string
     permissionMode: PermissionMode
+    model?: string
+    retryOf?: string
+    references: UiPromptFileReference[]
   }
   status: RunStatus
   statusEvents: RunStatusEvent[]
+  streamEvents: UiStreamEvent[]
+  nextEventId: number
   activity: ActivityItem[]
   events: AgentEvent[]
   toolCalls: Map<string, Extract<AgentEvent, { type: "tool_call" }>>
   controller: AbortController
   answer: string
   finishReason: string
+  model?: string
+  startedAt: string
+  completedAt?: string
+  estimatedInputTokens: number
+  providerInputTokens: number
+  providerOutputTokens: number
+  providerUsageSeen: boolean
+  retryCount: number
+  checkpointId?: string
   sessionId?: string
   error?: string
   subscribers: Set<ReadableStreamDefaultController<Uint8Array>>
   permissions: Map<string, UiPendingPermission>
   done: Promise<UiRunResult>
+}
+
+type UiStreamEvent = {
+  id: number
+  event: string
+  data: unknown
 }
 
 type UiPendingPermission = {
@@ -191,6 +289,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
     runs: new Map(),
     sessionPermissions: new Map(),
     sessionRunTail: new Map(),
+    workspaceMutations: new Map(),
     ...(options.cwd ? { cwd: options.cwd } : {}),
   }
   let server: Server
@@ -235,6 +334,7 @@ export async function createUiServer(options: { cwd?: string; token?: string } =
     runs: new Map(),
     sessionPermissions: new Map(),
     sessionRunTail: new Map(),
+    workspaceMutations: new Map(),
     ...(options.cwd ? { cwd: options.cwd } : {}),
   }
   return {
@@ -330,6 +430,27 @@ async function routeApi(request: Request, url: URL, context: UiServerContext): P
     const runtime = await runtimeFor(context)
     const statuses = await inspectMCPServers(runtime.config)
     return jsonResponse(apiSuccess({ servers: statuses.map((status) => mcpServerSummary(status, runtime.config.mcp[status.name])) }))
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/workspace") {
+    const runtime = await runtimeFor(context)
+    const project = await workspaceProject(runtime, url.searchParams.get("projectId"))
+    return jsonResponse(apiSuccess(await workspaceSnapshot(
+      project,
+      sessionWorkspaceProjectExcludePaths(runtime.config.sandbox.workspaceDir),
+    )))
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/workspace/content") {
+    const runtime = await runtimeFor(context)
+    const project = await workspaceProject(runtime, url.searchParams.get("projectId"))
+    return jsonResponse(apiSuccess(await readWorkspaceFileContent(project.rootPath, url.searchParams.get("path") ?? "")))
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/workspace/diff") {
+    const runtime = await runtimeFor(context)
+    const project = await workspaceProject(runtime, url.searchParams.get("projectId"))
+    return jsonResponse(apiSuccess(await workspaceFileDiff(project.rootPath, url.searchParams.get("path") ?? "")))
   }
 
   if (request.method === "GET" && url.pathname === "/api/sessions") {
@@ -434,6 +555,160 @@ async function routeApi(request: Request, url: URL, context: UiServerContext): P
     return jsonResponse(apiSuccess(await readSessionFileContent(session, path)))
   }
 
+  const sessionChangesMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/changes$/)
+  if (request.method === "GET" && sessionChangesMatch) {
+    const runtime = await runtimeFor(context)
+    const session = await requireSession(runtime, decodeURIComponent(sessionChangesMatch[1] ?? ""))
+    return jsonResponse(apiSuccess(await sessionChangeSet(runtime, session)))
+  }
+
+  const sessionChangeDiffMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/changes\/diff$/)
+  if (request.method === "GET" && sessionChangeDiffMatch) {
+    const runtime = await runtimeFor(context)
+    const session = await requireSession(runtime, decodeURIComponent(sessionChangeDiffMatch[1] ?? ""))
+    return jsonResponse(apiSuccess(await sessionChangeDiff(runtime, session, url.searchParams.get("path") ?? "")))
+  }
+
+  const sessionChangeMutationMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/changes\/(apply|discard)$/)
+  if (request.method === "POST" && sessionChangeMutationMatch) {
+    const runtime = await runtimeFor(context)
+    const sessionId = decodeURIComponent(sessionChangeMutationMatch[1] ?? "")
+    assertSessionHasNoActiveRun(context, sessionId)
+    const session = await requireSession(runtime, sessionId)
+    const binding = await requireBoundWorkspace(runtime, session)
+    const input = await readJsonBody<ChangeMutationInput>(request)
+    const revision = changeRevision(input.revision)
+    const selections = changeSelections(input.selections)
+    return await withWorkspaceMutation(context, binding.projectRoot, async () => {
+      const result = sessionChangeMutationMatch[2] === "apply"
+        ? await applySessionWorkspaceChanges(binding, { revision, selections })
+        : await discardSessionWorkspaceChanges(binding, { revision, selections })
+      return jsonResponse(apiSuccess({
+        operation: uiChangeOperation(result.operation),
+        changes: await sessionChangeSet(runtime, session),
+      } satisfies UiChangeMutationResult))
+    })
+  }
+
+  const sessionChangeUndoMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/changes\/undo$/)
+  if (request.method === "POST" && sessionChangeUndoMatch) {
+    const runtime = await runtimeFor(context)
+    const sessionId = decodeURIComponent(sessionChangeUndoMatch[1] ?? "")
+    assertSessionHasNoActiveRun(context, sessionId)
+    const session = await requireSession(runtime, sessionId)
+    const binding = await requireBoundWorkspace(runtime, session)
+    const input = await readJsonBody<ChangeMutationInput>(request)
+    const revision = changeRevision(input.revision)
+    return await withWorkspaceMutation(context, binding.projectRoot, async () => {
+      const result = await undoLastSessionWorkspaceApply(binding, { revision })
+      return jsonResponse(apiSuccess({
+        operation: uiChangeOperation(result.operation),
+        changes: await sessionChangeSet(runtime, session),
+      } satisfies UiChangeMutationResult))
+    })
+  }
+
+  const sessionStageMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/changes\/(stage|unstage)$/)
+  if (request.method === "POST" && sessionStageMatch) {
+    const runtime = await runtimeFor(context)
+    const sessionId = decodeURIComponent(sessionStageMatch[1] ?? "")
+    assertSessionHasNoActiveRun(context, sessionId)
+    const session = await requireSession(runtime, sessionId)
+    const binding = await requireBoundWorkspace(runtime, session)
+    const input = await readJsonBody<ChangeMutationInput>(request)
+    const revision = changeRevision(input.revision)
+    const selections = changeSelections(input.selections)
+    return await withWorkspaceMutation(context, binding.projectRoot, async () => {
+      const operation = await mutateGitStage(binding, revision, selections, sessionStageMatch[2] === "stage" ? "stage" : "unstage")
+      return jsonResponse(apiSuccess({
+        operation,
+        changes: await sessionChangeSet(runtime, session),
+      } satisfies UiChangeMutationResult))
+    })
+  }
+
+  const sessionCommitMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/changes\/commit$/)
+  if (request.method === "POST" && sessionCommitMatch) {
+    const runtime = await runtimeFor(context)
+    const sessionId = decodeURIComponent(sessionCommitMatch[1] ?? "")
+    assertSessionHasNoActiveRun(context, sessionId)
+    const session = await requireSession(runtime, sessionId)
+    const binding = await requireBoundWorkspace(runtime, session)
+    const input = await readJsonBody<ChangeCommitInput>(request)
+    const revision = changeRevision(input.revision)
+    const message = commitMessage(input.message)
+    return await withWorkspaceMutation(context, binding.projectRoot, async () => {
+      const operation = await commitSessionChanges(binding, revision, message)
+      return jsonResponse(apiSuccess({
+        operation,
+        changes: await sessionChangeSet(runtime, session),
+      } satisfies UiChangeMutationResult))
+    })
+  }
+
+  const sessionValidationsMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/validations$/)
+  if (request.method === "GET" && sessionValidationsMatch) {
+    const runtime = await runtimeFor(context)
+    const session = await requireSession(runtime, decodeURIComponent(sessionValidationsMatch[1] ?? ""))
+    return jsonResponse(apiSuccess({ validations: await sessionValidations(runtime, session) }))
+  }
+  if (request.method === "POST" && sessionValidationsMatch) {
+    const runtime = await runtimeFor(context)
+    const sessionId = decodeURIComponent(sessionValidationsMatch[1] ?? "")
+    assertSessionHasNoActiveRun(context, sessionId)
+    const session = await requireSession(runtime, sessionId)
+    const binding = await requireBoundWorkspace(runtime, session)
+    const input = await readJsonBody<ValidationInput>(request)
+    const turnId = validationTurnId(input.turnId)
+    const turn = (await runtime.sessions.readTurns(sessionId)).find((item) => item.id === turnId)
+    if (!turn) throw new PixiuError(`Unknown turn: ${turnId}`, { code: "TURN_NOT_FOUND" })
+    if (input.kind === "custom" && input.confirmed !== true) {
+      throw new PixiuError("Custom validation commands require explicit confirmation.", {
+        code: "WORKSPACE_VALIDATION_CONFIRMATION_REQUIRED",
+      })
+    }
+    return await withWorkspaceMutation(context, binding.projectRoot, async () => {
+      const diff = await structuredWorkspaceDiff(binding.baselineRoot, binding.workRoot)
+      const record = await runWorkspaceValidation(binding, {
+        sessionId,
+        turnId,
+        revision: diff.revision,
+        kind: input.kind,
+        ...(input.command === undefined ? {} : { command: input.command }),
+      }, {
+        presets: runtime.config.project.commands,
+        timeoutMs: runtime.config.sandbox.shellTimeoutMs,
+        outputMaxBytes: runtime.config.sandbox.outputMaxBytes,
+        envAllowlist: runtime.config.sandbox.envAllowlist,
+        signal: request.signal,
+      })
+      const current = await structuredWorkspaceDiff(binding.baselineRoot, binding.workRoot)
+      return jsonResponse(apiSuccess({
+        record: uiValidationRecord(record),
+        validations: await sessionValidations(runtime, session),
+        currentRevision: current.revision,
+      }))
+    })
+  }
+
+  const turnRollbackMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/turns\/([^/]+)\/rollback$/)
+  if (request.method === "POST" && turnRollbackMatch) {
+    const runtime = await runtimeFor(context)
+    const sessionId = decodeURIComponent(turnRollbackMatch[1] ?? "")
+    const turnId = decodeURIComponent(turnRollbackMatch[2] ?? "")
+    if ([...context.runs.values()].some((run) => run.sessionId === sessionId && !isRunTerminal(run))) {
+      throw new PixiuError("Cannot restore files while this session has an active run.", { code: "SESSION_RUN_ACTIVE" })
+    }
+    const session = await requireSession(runtime, sessionId)
+    const turn = (await runtime.sessions.readTurns(sessionId)).find((item) => item.id === turnId)
+    if (!turn) throw new PixiuError(`Unknown turn: ${turnId}`, { code: "TURN_NOT_FOUND" })
+    if (!turn.checkpointId) throw new PixiuError("This turn has no workspace checkpoint.", { code: "CHECKPOINT_NOT_FOUND" })
+    const binding = await boundWorkspaceForSession(runtime, session)
+    if (!binding) throw new PixiuError("Legacy sessions cannot restore workspace checkpoints.", { code: "CHECKPOINT_NOT_FOUND" })
+    await restoreWorkspaceCheckpoint(binding, turn.checkpointId)
+    return jsonResponse(apiSuccess({ turnId, checkpointId: turn.checkpointId, changes: await sessionChangeSet(runtime, session) }))
+  }
+
   const sessionDetailMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/)
   if (request.method === "GET" && sessionDetailMatch) {
     const runtime = await runtimeFor(context)
@@ -448,6 +723,8 @@ async function routeApi(request: Request, url: URL, context: UiServerContext): P
       files: await listSessionFiles(session),
       todos: await runtime.sessions.getTodos(session.id),
       activity: sessionActivity(session),
+      turns: await runtime.sessions.readTurns(session.id),
+      validations: await sessionValidations(runtime, session),
     }))
   }
 
@@ -494,10 +771,41 @@ async function routeApi(request: Request, url: URL, context: UiServerContext): P
     if (!project) throw new PixiuError(`Unknown project: ${projectId}`, { code: "PROJECT_NOT_FOUND" })
     const session = await requireSession(runtime, decodeURIComponent(sessionMoveMatch[1] ?? ""))
     if (isDeletedSession(session)) throw new PixiuError(`Unknown session: ${session.id}`, { code: "SESSION_NOT_FOUND" })
+    const currentBinding = await boundWorkspaceForSession(runtime, session)
+    let cwd = session.cwd
+    let workspaceMetadata: JsonObject = {}
+    if (currentBinding && resolve(project.rootPath) !== currentBinding.projectRoot) {
+      const [messages, diff] = await Promise.all([
+        runtime.sessions.readMessages(session.id),
+        structuredWorkspaceDiff(currentBinding.baselineRoot, currentBinding.workRoot),
+      ])
+      if (messages.length || diff.files.length) {
+        throw new PixiuError("A session with conversation history or workspace changes cannot be moved to another project.", {
+          code: "SESSION_MOVE_BOUND",
+        })
+      }
+      const nextBinding = await createSessionWorkspaceBinding({
+        stateRoot: resolveSessionWorkspaceStateRoot(runtime.config.sandbox.workspaceDir),
+        projectRoot: project.rootPath,
+        projectId: project.id,
+        sessionId: session.id,
+        excludePaths: sessionWorkspaceProjectExcludePaths(runtime.config.sandbox.workspaceDir),
+      })
+      cwd = nextBinding.workRoot
+      workspaceMetadata = {
+        workspaceDir: nextBinding.workRoot,
+        workspaceBindingVersion: nextBinding.version,
+        workspaceStateRoot: nextBinding.stateRoot,
+        workspaceProjectRoot: nextBinding.projectRoot,
+        workspaceBaseRevision: nextBinding.baseRevision,
+      }
+    }
     const updated = await runtime.sessions.updateSession(session.id, {
+      cwd,
       metadata: {
         ...sessionMetadata(session),
         projectId: project.id,
+        ...workspaceMetadata,
       },
     })
     const fallbackProjectId = await fallbackProjectIdFor(runtime)
@@ -508,14 +816,20 @@ async function routeApi(request: Request, url: URL, context: UiServerContext): P
     const input = await readJsonBody<RunInput>(request)
     const run = startAgentRun(context, input)
     if (url.searchParams.get("wait") === "1") return jsonResponse(apiSuccess(await run.done))
-    return jsonResponse(apiSuccess({ runId: run.id, status: run.status }))
+    return jsonResponse(apiSuccess({ runId: run.id, turnId: run.turnId, status: run.status }))
+  }
+
+  const runMatch = url.pathname.match(/^\/api\/runs\/([^/]+)$/)
+  if (request.method === "GET" && runMatch) {
+    const run = context.runs.get(decodeURIComponent(runMatch[1] ?? ""))
+    return jsonResponse(apiSuccess(run ? { found: true, status: run.status } : { found: false }))
   }
 
   const runEventsMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/events$/)
   if (request.method === "GET" && runEventsMatch) {
     const run = context.runs.get(decodeURIComponent(runEventsMatch[1] ?? ""))
     if (!run) return jsonResponse(apiFailure("RUN_NOT_FOUND", "Unknown run."), 404)
-    return streamRunEvents(run, request.signal)
+    return streamRunEvents(run, request.signal, request.headers.get("last-event-id"))
   }
 
   const runCancelMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/cancel$/)
@@ -570,22 +884,167 @@ async function readJsonBody<T>(request: Request): Promise<T> {
   return parsed as T
 }
 
+function changeRevision(value: unknown) {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) {
+    throw new PixiuError("A current workspace revision is required.", { code: "WORKSPACE_CHANGE_REQUEST_INVALID" })
+  }
+  return value
+}
+
+function changeSelections(value: unknown): UiChangeSelection[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 2_000) {
+    throw new PixiuError("At least one workspace file or hunk must be selected.", {
+      code: "WORKSPACE_CHANGE_REQUEST_INVALID",
+    })
+  }
+  return value.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new PixiuError("Workspace change selections must be objects.", {
+        code: "WORKSPACE_CHANGE_REQUEST_INVALID",
+      })
+    }
+    const input = item as Record<string, unknown>
+    const path = typeof input.path === "string" ? input.path.trim() : ""
+    if (!path || path.length > 1_000) {
+      throw new PixiuError("Each workspace change selection requires a path.", {
+        code: "WORKSPACE_CHANGE_REQUEST_INVALID",
+      })
+    }
+    if (input.hunkIds === undefined) return { path }
+    if (!Array.isArray(input.hunkIds) || input.hunkIds.length === 0 || input.hunkIds.some((id) => typeof id !== "string")) {
+      throw new PixiuError("hunkIds must contain selected workspace hunk ids.", {
+        code: "WORKSPACE_CHANGE_REQUEST_INVALID",
+      })
+    }
+    return { path, hunkIds: [...input.hunkIds] as string[] }
+  })
+}
+
+function commitMessage(value: unknown) {
+  if (typeof value !== "string" || !value.trim() || value.length > 4_096 || value.includes("\0")) {
+    throw new PixiuError("Commit message must be between 1 and 4096 characters.", {
+      code: "WORKSPACE_COMMIT_MESSAGE_INVALID",
+    })
+  }
+  return value.trim()
+}
+
+function parsePromptReferences(value: unknown): UiPromptFileReference[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) throw new PixiuError("references must be an array", { code: "UI_RUN_INVALID" })
+  if (value.length > MAX_PROMPT_REFERENCES) {
+    throw new PixiuError(`A prompt can reference at most ${MAX_PROMPT_REFERENCES} files.`, { code: "UI_RUN_INVALID" })
+  }
+  const sources = new Set<UiPromptFileReference["source"]>(["uploaded", "workspace", "generated", "evidence"])
+  const result: UiPromptFileReference[] = []
+  const seen = new Set<string>()
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new PixiuError("Each file reference must be an object.", { code: "UI_RUN_INVALID" })
+    }
+    const input = item as Record<string, unknown>
+    const path = typeof input.path === "string" ? input.path.trim() : ""
+    const source = typeof input.source === "string" && sources.has(input.source as UiPromptFileReference["source"])
+      ? input.source as UiPromptFileReference["source"]
+      : undefined
+    if (!path || path.length > 1_000 || !source) {
+      throw new PixiuError("Each file reference requires a valid path and source.", { code: "UI_RUN_INVALID" })
+    }
+    const startLine = optionalPositiveInteger(input.startLine, "startLine")
+    const endLine = optionalPositiveInteger(input.endLine, "endLine")
+    if (endLine !== undefined && startLine === undefined) {
+      throw new PixiuError("endLine requires startLine.", { code: "UI_RUN_INVALID" })
+    }
+    if (startLine !== undefined && endLine !== undefined && endLine < startLine) {
+      throw new PixiuError("endLine must be greater than or equal to startLine.", { code: "UI_RUN_INVALID" })
+    }
+    const key = `${source}:${path}:${startLine ?? ""}:${endLine ?? ""}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push({ path, source, ...(startLine !== undefined ? { startLine } : {}), ...(endLine !== undefined ? { endLine } : {}) })
+  }
+  return result
+}
+
+function optionalPositiveInteger(value: unknown, name: string) {
+  if (value === undefined) return undefined
+  if (!Number.isInteger(value) || Number(value) < 1) {
+    throw new PixiuError(`${name} must be a positive integer.`, { code: "UI_RUN_INVALID" })
+  }
+  return Number(value)
+}
+
+async function resolvePromptReferences(
+  runtime: Runtime,
+  sessionId: string,
+  references: UiPromptFileReference[],
+): Promise<SessionFileReference[]> {
+  if (!references.length) return []
+  const session = await requireSession(runtime, sessionId)
+  const resolved: SessionFileReference[] = []
+  let totalBytes = 0
+  for (const reference of references) {
+    const file = await readWorkspaceFileContent(session.cwd, reference.path)
+    const lines = file.content.split(/\r?\n/)
+    let content = file.content
+    if (reference.startLine !== undefined) {
+      const endLine = reference.endLine ?? reference.startLine
+      if (reference.startLine > lines.length || endLine > lines.length) {
+        throw new PixiuError(`Line range is outside ${reference.path} (${lines.length} lines).`, { code: "FILE_RANGE_INVALID" })
+      }
+      content = lines.slice(reference.startLine - 1, endLine).join("\n")
+    }
+    totalBytes += Buffer.byteLength(content)
+    if (totalBytes > MAX_PROMPT_REFERENCE_BYTES) {
+      throw new PixiuError("Referenced file contents exceed the 512 KB prompt limit.", { code: "FILE_REFERENCES_TOO_LARGE" })
+    }
+    resolved.push({
+      path: file.path,
+      content,
+      source: reference.source,
+      ...(reference.startLine !== undefined ? { startLine: reference.startLine } : {}),
+      ...(reference.endLine !== undefined ? { endLine: reference.endLine } : {}),
+    })
+  }
+  return resolved
+}
+
 function startAgentRun(context: UiServerContext, input: RunInput) {
   const message = typeof input.message === "string" ? input.message.trim() : ""
-  if (!message) throw new PixiuError("message is required", { code: "UI_RUN_INVALID" })
+  const references = parsePromptReferences(input.references)
+  if (!message && !references.length) throw new PixiuError("message or references are required", { code: "UI_RUN_INVALID" })
   const permissionMode = parsePermissionMode(typeof input.permissionMode === "string" ? input.permissionMode : undefined)
   const sessionId = typeof input.sessionId === "string" && input.sessionId.trim() ? input.sessionId.trim() : undefined
+  const model = typeof input.model === "string" && input.model.trim() ? input.model.trim().slice(0, 200) : undefined
+  const retryOf = typeof input.retryOf === "string" && input.retryOf.trim() ? input.retryOf.trim() : undefined
+  const startedAt = new Date().toISOString()
   const run: UiRunRecord = {
     id: createRunId(),
-    input: sessionId ? { message, sessionId, permissionMode } : { message, permissionMode },
+    turnId: createID("turn"),
+    input: {
+      message,
+      permissionMode,
+      ...(sessionId ? { sessionId } : {}),
+      ...(model ? { model } : {}),
+      ...(retryOf ? { retryOf } : {}),
+      references,
+    },
     status: "queued",
     statusEvents: [],
+    streamEvents: [],
+    nextEventId: 1,
     activity: [],
     events: [],
     toolCalls: new Map(),
     controller: new AbortController(),
     answer: "",
     finishReason: "",
+    startedAt,
+    estimatedInputTokens: 0,
+    providerInputTokens: 0,
+    providerOutputTokens: 0,
+    providerUsageSeen: false,
+    retryCount: 0,
     subscribers: new Set(),
     permissions: new Map(),
     done: Promise.resolve(undefined as never),
@@ -631,21 +1090,39 @@ async function executeRun(context: UiServerContext, run: UiRunRecord): Promise<U
       interactivePermissions: run.input.permissionMode !== "bypassPermissions" && run.input.permissionMode !== "plan",
       askPermission: (request, decision) => checkUiPermission(context, run, request, decision),
       signal: run.controller.signal,
+      ...(run.input.model ? { model: run.input.model } : {}),
     })
+    run.model = run.input.model ?? providerSummary(runtime.config).model
+    const references = run.input.sessionId
+      ? await resolvePromptReferences(runtime, run.input.sessionId, run.input.references)
+      : []
     for await (const event of runtime.runner.run(
       run.input.sessionId
-        ? { message: run.input.message, sessionId: run.input.sessionId, signal: run.controller.signal }
-        : { message: run.input.message, signal: run.controller.signal },
+        ? { message: run.input.message, sessionId: run.input.sessionId, turnId: run.turnId, references, signal: run.controller.signal }
+        : { message: run.input.message, turnId: run.turnId, references, signal: run.controller.signal },
     )) {
       run.events.push(event)
       if (event.type === "llm_text_delta") run.answer += event.text
       if (event.type === "message") run.answer = event.content
-      if (event.type === "session_created") run.sessionId = event.sessionId
+      if (event.type === "session_created") {
+        run.sessionId = event.sessionId
+        await createPersistedTurn(runtime, run)
+      }
+      if (event.type === "context_usage") {
+        if (event.source === "provider") {
+          run.providerUsageSeen = true
+          run.providerInputTokens += event.inputTokens
+          run.providerOutputTokens += event.outputTokens ?? 0
+        } else {
+          run.estimatedInputTokens += event.inputTokens
+        }
+      }
       if (event.type === "tool_call") {
         run.toolCalls.set(event.id, event)
         emitToolIntentActivity(run, event)
       }
       if (event.type === "tool_result") emitToolActivity(run, event)
+      if (event.type === "error") run.error = event.message
       if (event.type === "finish") {
         if (run.status !== "cancelled") run.finishReason = event.reason
         else if (!run.finishReason) run.finishReason = "cancelled"
@@ -676,6 +1153,8 @@ async function executeRun(context: UiServerContext, run: UiRunRecord): Promise<U
     if (!run.finishReason) run.finishReason = run.status
     emitRunEvent(run, "error", { message: redactSecrets(run.error) })
   } finally {
+    run.completedAt = new Date().toISOString()
+    if (runtime && run.sessionId) await finalizePersistedTurn(runtime, run).catch(() => undefined)
     if (runtime && run.sessionId) await updateUiSessionRunMetadata(runtime, run).catch(() => undefined)
     await runtime?.close()
     const result = runResult(run)
@@ -686,10 +1165,21 @@ async function executeRun(context: UiServerContext, run: UiRunRecord): Promise<U
 }
 
 function runResult(run: UiRunRecord): UiRunResult {
+  const inputTokens = run.providerUsageSeen ? run.providerInputTokens : run.estimatedInputTokens
+  const durationMs = run.completedAt ? Math.max(0, Date.parse(run.completedAt) - Date.parse(run.startedAt)) : undefined
   return redactForUi({
     runId: run.id,
+    turnId: run.turnId,
     status: terminalRunStatus(run.status),
     ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+    ...(run.model ? { model: run.model } : {}),
+    startedAt: run.startedAt,
+    ...(run.completedAt ? { completedAt: run.completedAt } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(inputTokens > 0 ? { inputTokens } : {}),
+    ...(run.providerUsageSeen ? { outputTokens: run.providerOutputTokens } : {}),
+    retryCount: run.retryCount,
+    ...(run.input.retryOf ? { retryOf: run.input.retryOf } : {}),
     answer: run.answer,
     finishReason: run.finishReason,
     events: redactForUi(run.events) as AgentEvent[],
@@ -823,18 +1313,19 @@ function stablePermissionInput(value: unknown) {
   return JSON.stringify(stable)
 }
 
-function streamRunEvents(run: UiRunRecord, signal?: AbortSignal) {
+function streamRunEvents(run: UiRunRecord, signal?: AbortSignal, lastEventId?: string | null) {
   const encoder = new TextEncoder()
+  const cursor = parseLastEventId(lastEventId)
   let controllerRef: ReadableStreamDefaultController<Uint8Array> | undefined
   let heartbeatTimer: ReturnType<typeof setInterval> | undefined
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       controllerRef = controller
-      for (const event of replayRunEvents(run)) {
-        controller.enqueue(encoder.encode(formatSSE(event.event, event.data)))
+      for (const event of run.streamEvents) {
+        if (event.id <= cursor) continue
+        controller.enqueue(encoder.encode(formatSSE(event.event, event.data, event.id)))
       }
-      if (isRunTerminal(run)) {
-        controller.enqueue(encoder.encode(formatSSE("result", runResult(run))))
+      if (isRunTerminal(run) && run.streamEvents.some((event) => event.event === "result")) {
         controller.close()
         return
       }
@@ -874,6 +1365,12 @@ function streamRunEvents(run: UiRunRecord, signal?: AbortSignal) {
   })
 }
 
+function parseLastEventId(value: string | null | undefined) {
+  if (!value || !/^\d+$/.test(value)) return 0
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 0
+}
+
 function replayRunEvents(run: UiRunRecord) {
   return [
     ...run.statusEvents.map((data) => ({ event: "run_status", data })),
@@ -882,6 +1379,16 @@ function replayRunEvents(run: UiRunRecord) {
       ? [{ event: "activity_updated", data: activityUpdatedEvent(run, run.activity.at(-1)) }]
       : []),
     ...run.events.map((data) => ({ event: "agent_event", data })),
+    ...[...run.permissions.values()].map((pending) => ({
+      event: "permission_request",
+      data: redactForUi({
+        id: pending.id,
+        runId: run.id,
+        request: pending.request,
+        decision: pending.decision,
+        similarityKey: permissionSimilarityKey(pending.request, pending.decision),
+      }),
+    })),
   ]
 }
 
@@ -977,7 +1484,10 @@ function legacyRunEventData(run: UiRunRecord) {
 }
 
 function emitRunEvent(run: UiRunRecord, event: string, data: unknown) {
-  const chunk = new TextEncoder().encode(formatSSE(event, redactForUi(data)))
+  const stored = { id: run.nextEventId, event, data } satisfies UiStreamEvent
+  run.nextEventId += 1
+  run.streamEvents.push(stored)
+  const chunk = new TextEncoder().encode(formatSSE(event, redactForUi(data), stored.id))
   for (const subscriber of [...run.subscribers]) {
     try {
       subscriber.enqueue(chunk)
@@ -1006,8 +1516,8 @@ function terminalRunStatus(status: RunStatus): TerminalRunStatus {
   return isTerminalRunStatus(status) ? status : "cancelled"
 }
 
-function formatSSE(event: string, data: unknown) {
-  return `event: ${event}\ndata: ${JSON.stringify(redactForUi(data))}\n\n`
+function formatSSE(event: string, data: unknown, id?: number) {
+  return `${id === undefined ? "" : `id: ${id}\n`}event: ${event}\ndata: ${JSON.stringify(redactForUi(data))}\n\n`
 }
 
 function redactForUi(value: unknown): unknown {
@@ -1194,7 +1704,7 @@ function mcpServerSummary(status: MCPServerStatus, config: PixiuConfig["mcp"][st
   }
 }
 
-async function fallbackProjectIdFor(runtime: RuntimeWithoutLLM) {
+async function fallbackProjectIdFor(runtime: Pick<RuntimeWithoutLLM, "projects">) {
   return fallbackProjectIdFromProjects(await runtime.projects.list())
 }
 
@@ -1307,6 +1817,50 @@ async function updateUiSessionRunMetadata(runtime: Runtime, run: UiRunRecord) {
         })),
       ]),
     },
+  })
+}
+
+async function createPersistedTurn(runtime: Runtime, run: UiRunRecord) {
+  if (!run.sessionId) return
+  const turns = await runtime.sessions.readTurns(run.sessionId)
+  if (turns.some((turn) => turn.id === run.turnId)) return
+  const retryTarget = run.input.retryOf ? turns.find((turn) => turn.id === run.input.retryOf) : undefined
+  if (run.input.retryOf && !retryTarget) {
+    throw new PixiuError(`Unknown retry turn: ${run.input.retryOf}`, { code: "TURN_NOT_FOUND" })
+  }
+  run.retryCount = retryTarget ? retryTarget.retryCount + 1 : 0
+  await runtime.sessions.createTurn({
+    id: run.turnId,
+    runId: run.id,
+    sessionId: run.sessionId,
+    model: run.model ?? providerSummary(runtime.config).model,
+    status: run.status,
+    startedAt: run.startedAt,
+    retryCount: run.retryCount,
+    ...(retryTarget ? { retryOf: retryTarget.id } : {}),
+  })
+  const session = await requireSession(runtime, run.sessionId)
+  const binding = await boundWorkspaceForSession(runtime, session)
+  if (binding) {
+    const checkpoint = await createWorkspaceCheckpoint(binding, run.turnId)
+    run.checkpointId = checkpoint.id
+    await runtime.sessions.updateTurn(run.sessionId, run.turnId, { checkpointId: checkpoint.id })
+  }
+}
+
+async function finalizePersistedTurn(runtime: Runtime, run: UiRunRecord) {
+  if (!run.sessionId) return
+  const turn = (await runtime.sessions.readTurns(run.sessionId)).find((item) => item.id === run.turnId)
+  if (!turn) return
+  const completedAt = run.completedAt ?? new Date().toISOString()
+  const inputTokens = run.providerUsageSeen ? run.providerInputTokens : run.estimatedInputTokens
+  await runtime.sessions.updateTurn(run.sessionId, run.turnId, {
+    status: terminalRunStatus(run.status),
+    completedAt,
+    durationMs: Math.max(0, Date.parse(completedAt) - Date.parse(run.startedAt)),
+    ...(inputTokens > 0 ? { inputTokens } : {}),
+    ...(run.providerUsageSeen ? { outputTokens: run.providerOutputTokens } : {}),
+    ...(run.error ? { error: run.error } : {}),
   })
 }
 
@@ -1436,46 +1990,27 @@ async function createUiSession(runtime: RuntimeWithoutLLM, input: SessionCreateI
   const projectId = typeof input.projectId === "string" && input.projectId.trim() ? input.projectId.trim() : (await runtime.projects.current()).id
   const project = await runtime.projects.get(projectId)
   if (!project) throw new PixiuError(`Unknown project: ${projectId}`, { code: "PROJECT_NOT_FOUND" })
-
-  // When the project points at a real local folder (a rootPath other than the repo root),
-  // run the session directly in that folder so the agent reads/writes the user's files.
-  // Otherwise fall back to a per-session sandbox under the configured workspace dir.
-  const projectRoot = resolve(project.rootPath)
-  const projectRooted = projectRoot !== resolve(runtime.cwd)
-  if (projectRooted) {
-    await mkdir(projectRoot, { recursive: true })
-    return runtime.sessions.create({
-      id,
-      cwd: projectRoot,
-      title,
-      metadata: {
-        projectId,
-        titleSource: "user",
-        sandboxMode: runtime.config.sandbox.mode,
-        projectRooted: true,
-        workspaceDir: isInside(runtime.cwd, projectRoot) ? relative(runtime.cwd, projectRoot) || "." : projectRoot,
-        model: providerSummary(runtime.config).model,
-        finishStatus: "idle",
-      },
-    })
-  }
-
   if (runtime.config.sandbox.mode === "workspace") {
-    const workspaceRoot =
-      runtime.config.sandbox.workspaceDir && isAbsolute(runtime.config.sandbox.workspaceDir)
-        ? runtime.config.sandbox.workspaceDir
-        : resolve(runtime.cwd, runtime.config.sandbox.workspaceDir)
-    const sessionRoot = join(workspaceRoot, id)
-    await mkdir(sessionRoot, { recursive: true })
+    const binding = await createSessionWorkspaceBinding({
+      stateRoot: resolveSessionWorkspaceStateRoot(runtime.config.sandbox.workspaceDir),
+      projectRoot: project.rootPath,
+      projectId: project.id,
+      sessionId: id,
+      excludePaths: sessionWorkspaceProjectExcludePaths(runtime.config.sandbox.workspaceDir),
+    })
     return runtime.sessions.create({
       id,
-      cwd: sessionRoot,
+      cwd: binding.workRoot,
       title,
       metadata: {
         projectId,
         titleSource: "user",
         sandboxMode: "workspace",
-        workspaceDir: relative(runtime.cwd, sessionRoot),
+        workspaceDir: binding.workRoot,
+        workspaceBindingVersion: binding.version,
+        workspaceStateRoot: binding.stateRoot,
+        workspaceProjectRoot: binding.projectRoot,
+        workspaceBaseRevision: binding.baseRevision,
         model: providerSummary(runtime.config).model,
         finishStatus: "idle",
       },
@@ -1496,20 +2031,818 @@ async function createUiSession(runtime: RuntimeWithoutLLM, input: SessionCreateI
   })
 }
 
-async function requireSession(runtime: RuntimeWithoutLLM, sessionId: string) {
+async function boundWorkspaceForSession(
+  runtime: Pick<RuntimeWithoutLLM, "sessions" | "projects" | "config">,
+  session: SessionRecord,
+): Promise<SessionWorkspaceBinding | undefined> {
+  const metadata = sessionMetadata(session)
+  if (metadata.workspaceBindingVersion !== 1) return undefined
+  const stateRoot = typeof metadata.workspaceStateRoot === "string" ? metadata.workspaceStateRoot : undefined
+  if (!stateRoot) throw new PixiuError("Session workspace metadata is incomplete.", { code: "SESSION_WORKSPACE_META_INVALID" })
+  const fallbackProjectId = await fallbackProjectIdFor(runtime)
+  const project = await runtime.projects.get(sessionProjectId(session, fallbackProjectId))
+  if (!project) throw new PixiuError("The project bound to this session no longer exists.", { code: "PROJECT_NOT_FOUND" })
+  const binding = await loadSessionWorkspaceBinding({
+    stateRoot,
+    projectRoot: project.rootPath,
+    sessionId: session.id,
+  })
+  if (resolve(session.cwd) !== binding.workRoot) {
+    throw new PixiuError("Session cwd does not match its workspace binding.", { code: "SESSION_WORKSPACE_META_MISMATCH" })
+  }
+  return binding
+}
+
+async function requireBoundWorkspace(runtime: RuntimeWithoutLLM, session: SessionRecord) {
+  const binding = await boundWorkspaceForSession(runtime, session)
+  if (!binding) {
+    throw new PixiuError("Legacy sessions cannot mutate isolated workspace changes.", {
+      code: "SESSION_WORKSPACE_UNAVAILABLE",
+    })
+  }
+  return binding
+}
+
+async function sessionValidations(runtime: RuntimeWithoutLLM, session: SessionRecord): Promise<UiValidationRecord[]> {
+  const binding = await boundWorkspaceForSession(runtime, session)
+  if (!binding) return []
+  return (await listWorkspaceValidationRecords(binding))
+    .map(uiValidationRecord)
+    .sort((left, right) => left.startedAt.localeCompare(right.startedAt))
+}
+
+function uiValidationRecord(record: WorkspaceValidationRecord): UiValidationRecord {
+  return {
+    id: record.id,
+    sessionId: record.sessionId,
+    turnId: record.turnId,
+    revision: record.revision,
+    kind: record.kind,
+    command: record.command,
+    status: record.status,
+    startedAt: record.startedAt,
+    completedAt: record.completedAt,
+    durationMs: record.durationMs,
+    exitCode: record.exitCode,
+    output: record.output,
+    truncated: record.truncated,
+    timedOut: record.timedOut,
+  }
+}
+
+function validationTurnId(value: unknown) {
+  if (typeof value !== "string" || !value.trim() || value.length > 200 || /[\0\r\n]/.test(value)) {
+    throw new PixiuError("Validation turnId is invalid.", { code: "WORKSPACE_VALIDATION_KEY_INVALID" })
+  }
+  return value.trim()
+}
+
+function activeSessionApplies(operations: SessionWorkspaceChangeOperation[]) {
+  const undone = new Set(operations.filter((operation) => operation.action === "undo" && operation.applyId).map((operation) => operation.applyId!))
+  return operations.filter((operation) => operation.action === "apply" && !undone.has(operation.id))
+}
+
+function uiChangeOperation(operation: SessionWorkspaceChangeOperation): UiChangeOperation {
+  return {
+    id: operation.id,
+    action: operation.action,
+    paths: [...operation.paths],
+    createdAt: operation.createdAt,
+    revision: operation.revision,
+    selections: operation.selections.map((selection) => selection.hunkIds
+      ? { path: selection.path, hunkIds: [...selection.hunkIds] }
+      : { path: selection.path }),
+  }
+}
+
+function assertSessionHasNoActiveRun(context: UiServerContext, sessionId: string) {
+  if ([...context.runs.values()].some((run) => run.sessionId === sessionId && !isRunTerminal(run))) {
+    throw new PixiuError("Cannot mutate files while this session has an active run.", { code: "SESSION_RUN_ACTIVE" })
+  }
+}
+
+async function withWorkspaceMutation<T>(
+  context: UiServerContext,
+  key: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const previous = context.workspaceMutations.get(key) ?? Promise.resolve()
+  let release: () => void = () => undefined
+  const current = new Promise<void>((resolveCurrent) => {
+    release = resolveCurrent
+  })
+  const queued = previous.then(() => current)
+  context.workspaceMutations.set(key, queued)
+  await previous
+  try {
+    return await task()
+  } finally {
+    release()
+    if (context.workspaceMutations.get(key) === queued) context.workspaceMutations.delete(key)
+  }
+}
+
+async function sessionChangeSet(runtime: RuntimeWithoutLLM, session: SessionRecord): Promise<UiChangeSetSnapshot> {
+  const binding = await boundWorkspaceForSession(runtime, session)
+  if (!binding) {
+    return {
+      available: false,
+      sessionId: session.id,
+      changes: [],
+      canUndo: false,
+      message: "This legacy session has no isolated project baseline. Create a new session to review and apply changes.",
+    }
+  }
+  const [diff, git, applyState] = await Promise.all([
+    structuredWorkspaceDiff(binding.baselineRoot, binding.workRoot),
+    inspectGitWorkspace(binding.projectRoot),
+    readSessionWorkspaceApplyState(binding),
+  ])
+  const stagedPaths = new Set(git.changedFiles.filter((file) => file.indexStatus !== " " && file.indexStatus !== "?").map((file) => file.path))
+  const changedProjectPaths = new Set(git.changedFiles.map((file) => file.path))
+  const activeApplies = activeSessionApplies(applyState.operations)
+  const fallbackProjectId = await fallbackProjectIdFor(runtime)
+  return {
+    available: true,
+    sessionId: session.id,
+    projectId: sessionProjectId(session, fallbackProjectId),
+    projectRoot: binding.projectRoot,
+    createdAt: binding.createdAt,
+    baseRevision: diff.baseRevision,
+    workRevision: diff.workRevision,
+    revision: diff.revision,
+    changes: diff.files.map((file) => {
+      const applies = activeApplies.filter((operation) => operation.paths.includes(file.path))
+      const wholeFileApplied = applies.some((operation) => operation.selections?.some((selection) => (
+        selection.path === file.path && selection.hunkIds === undefined
+      )))
+      const appliedHunkIds = wholeFileApplied
+        ? file.hunks.map((hunk) => hunk.id)
+        : [...new Set(applies.flatMap((operation) => operation.revision === diff.revision
+          ? operation.selections?.find((selection) => selection.path === file.path)?.hunkIds ?? []
+          : []))]
+      const applied = applies.length > 0
+      return {
+        path: file.path,
+        status: file.status,
+        binary: file.binary,
+        size: file.newSize ?? file.oldSize ?? 0,
+        hunkCount: file.hunks.length,
+        additions: file.additions,
+        deletions: file.deletions,
+        appliedHunkIds,
+        applied,
+        staged: stagedPaths.has(file.path),
+        committed: applied && !changedProjectPaths.has(file.path),
+      }
+    }),
+    canUndo: applyState.canUndo,
+  }
+}
+
+async function sessionChangeDiff(
+  runtime: RuntimeWithoutLLM,
+  session: SessionRecord,
+  path: string,
+): Promise<UiChangeSetDiff> {
+  if (!path.trim()) throw new PixiuError("path is required", { code: "FILE_PATH_REQUIRED" })
+  const binding = await boundWorkspaceForSession(runtime, session)
+  if (!binding) {
+    return { path, available: false, binary: false, content: "", hunks: [], truncated: false, message: "Legacy session changes are unavailable." }
+  }
+  const diff = await structuredWorkspaceDiff(binding.baselineRoot, binding.workRoot)
+  const file = diff.files.find((item) => item.path === path)
+  if (!file) {
+    return { path, available: false, binary: false, content: "", hunks: [], truncated: false, revision: diff.revision, message: "This file has no session changes." }
+  }
+  const content = workspaceUnifiedDiff(file)
+  return {
+    path: file.path,
+    available: true,
+    status: file.status,
+    revision: diff.revision,
+    binary: file.binary,
+    content,
+    hunks: file.hunks.map((hunk) => ({
+      id: hunk.id,
+      header: hunk.header,
+      oldStart: hunk.oldStart,
+      oldLines: hunk.oldLines,
+      newStart: hunk.newStart,
+      newLines: hunk.newLines,
+      content: hunk.patch,
+    })),
+    truncated: false,
+    ...(file.hunksUnavailableReason ? { message: `Line hunks are unavailable for this ${file.hunksUnavailableReason} change.` } : {}),
+  }
+}
+
+function workspaceUnifiedDiff(file: StructuredWorkspaceFileDiff, hunks: WorkspaceDiffHunk[] = file.hunks) {
+  const before = file.status === "added" ? "/dev/null" : `a/${file.path}`
+  const after = file.status === "deleted" ? "/dev/null" : `b/${file.path}`
+  const headers = [`diff --git a/${file.path} b/${file.path}`, `--- ${before}`, `+++ ${after}`]
+  if (file.binary) return [...headers, "Binary files differ"].join("\n")
+  return `${[...headers, ...hunks.map((hunk) => hunk.patch.trimEnd())].join("\n")}\n`
+}
+
+async function requireSession(runtime: Pick<RuntimeWithoutLLM, "sessions">, sessionId: string) {
   const session = await runtime.sessions.getSession(sessionId)
   if (!session) throw new PixiuError(`Unknown session: ${sessionId}`, { code: "SESSION_NOT_FOUND" })
   return session
 }
 
+async function workspaceProject(runtime: RuntimeWithoutLLM, requestedId: string | null) {
+  const projectId = requestedId?.trim()
+  const project = projectId ? await runtime.projects.get(projectId) : await runtime.projects.current()
+  if (!project) throw new PixiuError(`Unknown project: ${projectId ?? "current"}`, { code: "PROJECT_NOT_FOUND" })
+  return project
+}
+
+async function workspaceSnapshot(project: ProjectRecord, excludedPaths: string[] = []): Promise<UiWorkspaceSnapshot> {
+  const rootPath = resolve(project.rootPath)
+  try {
+    const info = await stat(rootPath)
+    if (!info.isDirectory()) {
+      return unavailableWorkspaceSnapshot(project, rootPath, "Project root is not a directory.")
+    }
+
+    const entries: UiWorkspaceEntry[] = []
+    const walkState = { truncated: false }
+    await walkWorkspaceFiles(rootPath, ".", entries, walkState, excludedPaths)
+    const inspectedGit = await inspectGitWorkspace(rootPath)
+    const git = {
+      ...inspectedGit,
+      changedFiles: inspectedGit.changedFiles.filter((file) => !isConfiguredWorkspacePath(file.path, excludedPaths)),
+    }
+    const changedByPath = new Map(git.changedFiles.map((file) => [file.path, file.status]))
+    const annotatedEntries = entries.map((entry) => {
+      const gitStatus = changedByPath.get(entry.path)
+      return gitStatus ? { ...entry, gitStatus } : entry
+    })
+    return {
+      available: true,
+      projectId: project.id,
+      projectName: project.name,
+      rootPath,
+      entries: annotatedEntries,
+      truncated: walkState.truncated,
+      git,
+    }
+  } catch (error: any) {
+    if (["ENOENT", "EACCES", "EPERM"].includes(String(error?.code))) {
+      return unavailableWorkspaceSnapshot(project, rootPath, "Project root is unavailable or unreadable.")
+    }
+    throw error
+  }
+}
+
+function unavailableWorkspaceSnapshot(project: ProjectRecord, rootPath: string, message: string): UiWorkspaceSnapshot {
+  return {
+    available: false,
+    projectId: project.id,
+    projectName: project.name,
+    rootPath,
+    entries: [],
+    truncated: false,
+    git: gitUnavailable("not_repository", "Git information is unavailable because the project root cannot be read."),
+    message,
+  }
+}
+
+async function walkWorkspaceFiles(
+  root: string,
+  current: string,
+  entries: UiWorkspaceEntry[],
+  state: { truncated: boolean },
+  excludedPaths: string[],
+) {
+  if (entries.length >= MAX_WORKSPACE_ENTRIES) {
+    state.truncated = true
+    return
+  }
+  let children
+  try {
+    children = await readdir(resolve(root, current), { withFileTypes: true })
+  } catch (error: any) {
+    if (["ENOENT", "EACCES", "EPERM"].includes(String(error?.code))) return
+    throw error
+  }
+  children.sort((left, right) => {
+    const leftDirectory = left.isDirectory() ? 0 : 1
+    const rightDirectory = right.isDirectory() ? 0 : 1
+    return leftDirectory - rightDirectory || left.name.localeCompare(right.name)
+  })
+  for (const child of children) {
+    if (entries.length >= MAX_WORKSPACE_ENTRIES) {
+      state.truncated = true
+      return
+    }
+    const childPath = current === "." ? child.name : join(current, child.name)
+    if ([".git", ".tools", ".venv", "node_modules"].includes(child.name)
+      || (current === "." && child.name === ".pixiu")
+      || isConfiguredWorkspacePath(childPath, excludedPaths)) continue
+    const absolutePath = resolve(root, childPath)
+    let info
+    try {
+      info = await lstat(absolutePath)
+    } catch (error: any) {
+      if (["ENOENT", "EACCES", "EPERM"].includes(String(error?.code))) continue
+      throw error
+    }
+    const base = {
+      path: relative(root, absolutePath),
+      name: child.name,
+      parentPath: current,
+      updatedAt: info.mtime.toISOString(),
+    }
+    if (info.isSymbolicLink()) {
+      entries.push({ ...base, type: "symlink" })
+      continue
+    }
+    if (info.isDirectory()) {
+      entries.push({ ...base, type: "directory" })
+      await walkWorkspaceFiles(root, childPath, entries, state, excludedPaths)
+      continue
+    }
+    if (!info.isFile()) continue
+    entries.push({
+      ...base,
+      type: "file",
+      size: info.size,
+      kind: isTextLikePath(child.name) ? "text" : "binary",
+    })
+  }
+}
+
+function isConfiguredWorkspacePath(path: string, excludedPaths: string[]) {
+  const normalized = path.split(sep).join("/")
+  return excludedPaths.some((excluded) => normalized === excluded || normalized.startsWith(`${excluded}/`))
+}
+
+async function readWorkspaceFileContent(rootPath: string, path: string) {
+  const target = await resolveWorkspaceTarget(rootPath, path)
+  const info = await stat(target.absolutePath)
+  if (!info.isFile()) throw new PixiuError("Only files can be previewed.", { code: "WORKSPACE_PATH_NOT_FILE" })
+  if (info.size > MAX_WORKSPACE_PREVIEW_BYTES) throw new PixiuError("File is too large to preview.", { code: "FILE_TOO_LARGE" })
+  const content = await readFile(target.absolutePath)
+  if (content.includes(0)) throw new PixiuError("Only text files can be previewed.", { code: "FILE_NOT_TEXT" })
+  return {
+    path: target.relativePath,
+    size: info.size,
+    updatedAt: info.mtime.toISOString(),
+    content: content.toString("utf8"),
+  }
+}
+
+async function resolveWorkspaceTarget(rootPath: string, path: string, options: { allowMissing?: boolean } = {}) {
+  if (!path.trim()) throw new PixiuError("path is required", { code: "FILE_PATH_REQUIRED" })
+  const root = resolve(rootPath)
+  const guard = new PathGuard({ workspaceRoot: root, workspaceOnly: true })
+  const target = guard.resolvePath(path)
+  let canonicalRoot: string
+  try {
+    canonicalRoot = await realpath(root)
+  } catch (cause) {
+    throw new PixiuError("Project root is unavailable.", { code: "WORKSPACE_ROOT_UNAVAILABLE", cause })
+  }
+
+  try {
+    const canonicalTarget = await realpath(target.absolutePath)
+    if (!isInside(canonicalRoot, canonicalTarget)) {
+      throw new PixiuError(`Path escapes workspace: ${path}`, { code: "PATH_OUTSIDE_WORKSPACE" })
+    }
+  } catch (error: any) {
+    if (error instanceof PixiuError) throw error
+    if (error?.code !== "ENOENT" || !options.allowMissing) {
+      if (error?.code === "ENOENT") throw new PixiuError(`Unknown workspace file: ${path}`, { code: "WORKSPACE_FILE_NOT_FOUND", cause: error })
+      throw error
+    }
+    const canonicalParent = await nearestExistingParent(dirname(target.absolutePath), root)
+    if (!isInside(canonicalRoot, canonicalParent)) {
+      throw new PixiuError(`Path escapes workspace: ${path}`, { code: "PATH_OUTSIDE_WORKSPACE" })
+    }
+  }
+  return target
+}
+
+async function nearestExistingParent(start: string, root: string) {
+  let current = start
+  while (isInside(root, current)) {
+    try {
+      return await realpath(current)
+    } catch (error: any) {
+      if (error?.code !== "ENOENT") throw error
+      const parent = dirname(current)
+      if (parent === current) break
+      current = parent
+    }
+  }
+  throw new PixiuError("Workspace file parent is unavailable.", { code: "WORKSPACE_FILE_NOT_FOUND" })
+}
+
+async function mutateGitStage(
+  binding: SessionWorkspaceBinding,
+  revision: string,
+  selections: UiChangeSelection[],
+  action: "stage" | "unstage",
+): Promise<UiChangeOperation> {
+  const diff = await currentSessionChangeDiff(binding, revision)
+  const selected = selectedStageChanges(diff, selections)
+  const paths = selected.map((item) => item.selection.path)
+  const git = await inspectGitWorkspace(binding.projectRoot)
+  if (!git.available) {
+    throw new PixiuError(git.message ?? "The project is not a Git worktree.", { code: "WORKSPACE_GIT_UNAVAILABLE" })
+  }
+  const stagedPaths = new Set(git.changedFiles.filter((file) => file.indexStatus !== " " && file.indexStatus !== "?").map((file) => file.path))
+  if (action === "stage") {
+    await assertSessionWorkspaceSelectionsApplied(binding, { revision, selections })
+  } else {
+    const notStaged = paths.find((path) => !stagedPaths.has(path))
+    if (notStaged) {
+      throw new PixiuError(`Workspace file is not staged: ${notStaged}`, { code: "WORKSPACE_CHANGE_NOT_STAGED" })
+    }
+  }
+
+  const wholeFilePaths = selected.filter((item) => !item.hunks).map((item) => item.selection.path)
+  if (wholeFilePaths.length) {
+    const result = action === "stage"
+      ? await runGit(binding.projectRoot, ["add", "--", ...wholeFilePaths], MAX_GIT_STATUS_BYTES)
+      : await unstageGitPaths(binding.projectRoot, wholeFilePaths)
+    if (!result.ok) throw gitMutationError(action, result)
+  }
+  const hunkPatch = selected
+    .filter((item): item is typeof item & { hunks: WorkspaceDiffHunk[] } => Boolean(item.hunks))
+    .map((item) => workspaceUnifiedDiff(item.file, item.hunks))
+    .join("")
+  if (hunkPatch) {
+    const args = ["apply", "--cached", "--recount", ...(action === "unstage" ? ["--reverse"] : []), "-"]
+    const result = await runGit(binding.projectRoot, args, MAX_GIT_DIFF_BYTES, [0], hunkPatch)
+    if (!result.ok) throw gitMutationError(action, result)
+  }
+  return {
+    id: createID("changeop"),
+    action,
+    paths,
+    revision,
+    selections: selected.map((item) => item.selection.hunkIds
+      ? { path: item.selection.path, hunkIds: [...item.selection.hunkIds] }
+      : { path: item.selection.path }),
+    createdAt: new Date().toISOString(),
+  }
+}
+
+async function commitSessionChanges(
+  binding: SessionWorkspaceBinding,
+  revision: string,
+  message: string,
+): Promise<UiChangeOperation> {
+  await currentSessionChangeDiff(binding, revision)
+  const applyState = await readSessionWorkspaceApplyState(binding)
+  const appliedPaths = new Set(activeSessionApplies(applyState.operations).flatMap((operation) => operation.paths))
+  const git = await inspectGitWorkspace(binding.projectRoot)
+  if (!git.available) {
+    throw new PixiuError(git.message ?? "The project is not a Git worktree.", { code: "WORKSPACE_GIT_UNAVAILABLE" })
+  }
+  const paths = git.changedFiles
+    .filter((file) => file.indexStatus !== " " && file.indexStatus !== "?")
+    .map((file) => file.path)
+  if (!paths.length) throw new PixiuError("There are no staged session changes to commit.", { code: "WORKSPACE_COMMIT_EMPTY" })
+  const unrelated = paths.filter((path) => !appliedPaths.has(path))
+  if (unrelated.length) {
+    throw new PixiuError(`Refusing to include staged files outside this session: ${unrelated.join(", ")}`, {
+      code: "WORKSPACE_COMMIT_SCOPE_CONFLICT",
+    })
+  }
+  const committed = await runGit(binding.projectRoot, ["commit", "-m", message], MAX_GIT_DIFF_BYTES)
+  if (!committed.ok) throw gitMutationError("commit", committed)
+  const head = await runGit(binding.projectRoot, ["rev-parse", "HEAD"], 256)
+  const commit = head.ok ? head.stdout.trim() : undefined
+  return {
+    id: createID("changeop"),
+    action: "commit",
+    paths,
+    revision,
+    createdAt: new Date().toISOString(),
+    message,
+    ...(commit ? { commit } : {}),
+  }
+}
+
+async function currentSessionChangeDiff(binding: SessionWorkspaceBinding, revision: string) {
+  const diff = await structuredWorkspaceDiff(binding.baselineRoot, binding.workRoot)
+  if (diff.baseRevision !== binding.baseRevision) {
+    throw new PixiuError("The session workspace baseline changed.", { code: "SESSION_WORKSPACE_BASELINE_CHANGED" })
+  }
+  if (diff.revision !== revision) {
+    throw new PixiuError("The workspace changes changed since they were reviewed.", { code: "WORKSPACE_CHANGE_STALE" })
+  }
+  return diff
+}
+
+function selectedStageChanges(
+  diff: StructuredWorkspaceDiff,
+  selections: UiChangeSelection[],
+) {
+  const changedByPath = new Map(diff.files.map((file) => [file.path, file]))
+  const selected = selections.map((selection) => {
+    const file = changedByPath.get(selection.path)
+    if (!file) {
+      throw new PixiuError(`Unknown workspace change: ${selection.path}`, { code: "WORKSPACE_CHANGE_NOT_FOUND" })
+    }
+    if (!selection.hunkIds) return { file, selection }
+    if (!selection.hunkIds.length || new Set(selection.hunkIds).size !== selection.hunkIds.length) {
+      throw new PixiuError("Selected workspace hunks must be unique.", { code: "WORKSPACE_CHANGE_SELECTION_INVALID" })
+    }
+    if (file.hunksUnavailableReason || !file.hunks.length) {
+      throw new PixiuError(`Line hunks are unavailable for ${selection.path}.`, { code: "WORKSPACE_HUNKS_UNAVAILABLE" })
+    }
+    const byId = new Map(file.hunks.map((hunk) => [hunk.id, hunk]))
+    const hunks = selection.hunkIds.map((id) => {
+      const hunk = byId.get(id)
+      if (!hunk) throw new PixiuError(`Unknown workspace hunk for ${selection.path}.`, { code: "WORKSPACE_HUNK_NOT_FOUND" })
+      return hunk
+    })
+    return { file, selection, hunks }
+  })
+  if (new Set(selected.map((item) => item.selection.path)).size !== selected.length) {
+    throw new PixiuError("A workspace path was selected more than once.", { code: "WORKSPACE_CHANGE_REQUEST_INVALID" })
+  }
+  return selected.sort((left, right) => left.selection.path.localeCompare(right.selection.path))
+}
+
+async function unstageGitPaths(root: string, paths: string[]) {
+  const head = await runGit(root, ["rev-parse", "--verify", "HEAD"], 256)
+  return head.ok
+    ? await runGit(root, ["reset", "--quiet", "HEAD", "--", ...paths], MAX_GIT_STATUS_BYTES)
+    : await runGit(root, ["rm", "--cached", "-r", "--ignore-unmatch", "--", ...paths], MAX_GIT_STATUS_BYTES)
+}
+
+function gitMutationError(action: string, result: GitCommandResult) {
+  const detail = redactSecrets(result.stderr.trim() || result.stdout.trim())
+  return new PixiuError(`Git ${action} failed${detail ? `: ${detail}` : "."}`, {
+    code: "WORKSPACE_GIT_COMMAND_FAILED",
+  })
+}
+
+async function inspectGitWorkspace(root: string): Promise<UiWorkspaceGitSummary> {
+  const repository = await runGit(root, ["rev-parse", "--is-inside-work-tree"], 256)
+  if (!repository.ok || repository.stdout.trim() !== "true") {
+    return repository.unavailable
+      ? gitUnavailable("git_unavailable", "Git is not installed or cannot be started.")
+      : gitUnavailable("not_repository", "This project is not inside a Git worktree.")
+  }
+
+  const status = await runGit(
+    root,
+    ["-c", "status.relativePaths=true", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=no", "--", "."],
+    MAX_GIT_STATUS_BYTES,
+  )
+  if (!status.ok) return gitUnavailable("command_failed", "Git status could not be read.")
+
+  const symbolicBranch = await runGit(root, ["symbolic-ref", "--quiet", "--short", "HEAD"], 512)
+  const detachedHead = symbolicBranch.ok ? undefined : await runGit(root, ["rev-parse", "--short", "HEAD"], 512)
+  const branch = symbolicBranch.ok && symbolicBranch.stdout.trim()
+    ? symbolicBranch.stdout.trim()
+    : detachedHead?.ok && detachedHead.stdout.trim()
+      ? `HEAD@${detachedHead.stdout.trim()}`
+      : undefined
+  return {
+    available: true,
+    changedFiles: parseGitStatus(status.stdout),
+    ...(branch ? { branch } : {}),
+    ...(status.truncated ? { truncated: true, message: "Git status was truncated." } : {}),
+  }
+}
+
+function gitUnavailable(reason: NonNullable<UiWorkspaceGitSummary["reason"]>, message: string): UiWorkspaceGitSummary {
+  return { available: false, changedFiles: [], reason, message }
+}
+
+function parseGitStatus(output: string): UiWorkspaceChangedFile[] {
+  const records = output.split("\0")
+  const changed: UiWorkspaceChangedFile[] = []
+  for (let index = 0; index < records.length; index++) {
+    const record = records[index]
+    if (!record || record.length < 4) continue
+    const indexStatus = record[0] ?? " "
+    const workingTreeStatus = record[1] ?? " "
+    const path = safeGitPath(record.slice(3))
+    const hasPreviousPath = indexStatus === "R" || indexStatus === "C" || workingTreeStatus === "R" || workingTreeStatus === "C"
+    const originalPath = hasPreviousPath ? safeGitPath(records[++index] ?? "") : undefined
+    if (hasPreviousPath && !originalPath) continue
+    if (!path) continue
+    changed.push({
+      path,
+      status: workspaceChangeStatus(indexStatus, workingTreeStatus),
+      indexStatus,
+      workingTreeStatus,
+      ...(originalPath ? { originalPath } : {}),
+    })
+  }
+  return changed.sort((left, right) => left.path.localeCompare(right.path))
+}
+
+function safeGitPath(path: string) {
+  const value = path.startsWith("./") ? path.slice(2) : path
+  if (!value || value === ".." || value.startsWith("../") || isAbsolute(value)) return undefined
+  return value
+}
+
+function workspaceChangeStatus(indexStatus: string, workingTreeStatus: string): UiWorkspaceChangeStatus {
+  const pair = `${indexStatus}${workingTreeStatus}`
+  if (pair === "??") return "untracked"
+  if (["DD", "AU", "UD", "UA", "DU", "AA", "UU"].includes(pair)) return "conflicted"
+  if (indexStatus === "R" || workingTreeStatus === "R") return "renamed"
+  if (indexStatus === "C" || workingTreeStatus === "C") return "copied"
+  if (indexStatus === "A" || workingTreeStatus === "A") return "added"
+  if (indexStatus === "D" || workingTreeStatus === "D") return "deleted"
+  if (indexStatus === "T" || workingTreeStatus === "T") return "type-changed"
+  return "modified"
+}
+
+async function workspaceFileDiff(rootPath: string, path: string): Promise<UiWorkspaceDiff> {
+  const target = await resolveWorkspaceTarget(rootPath, path, { allowMissing: true })
+  try {
+    const info = await stat(target.absolutePath)
+    if (info.isDirectory()) throw new PixiuError("Only files can be diffed.", { code: "WORKSPACE_PATH_NOT_FILE" })
+  } catch (error: any) {
+    if (error instanceof PixiuError) throw error
+    if (error?.code !== "ENOENT") throw error
+  }
+
+  const git = await inspectGitWorkspace(resolve(rootPath))
+  if (!git.available) {
+    return {
+      path: target.relativePath,
+      available: false,
+      content: "",
+      truncated: false,
+      ...(git.reason ? { reason: git.reason } : {}),
+      ...(git.message ? { message: git.message } : {}),
+    }
+  }
+  const changed = git.changedFiles.find((file) => file.path === target.relativePath)
+  if (!changed) {
+    return {
+      path: target.relativePath,
+      available: false,
+      content: "",
+      truncated: false,
+      reason: "unchanged",
+      message: "This file has no Git changes.",
+      ...(git.branch ? { branch: git.branch } : {}),
+    }
+  }
+
+  const result = changed.status === "untracked"
+    ? await runGit(
+        rootPath,
+        ["diff", "--no-index", "--no-ext-diff", "--no-color", "--", "/dev/null", target.relativePath],
+        MAX_GIT_DIFF_BYTES,
+        [0, 1],
+      )
+    : await gitDiffFromHead(rootPath, target.relativePath)
+  if (!result.ok) {
+    return {
+      path: target.relativePath,
+      available: false,
+      content: "",
+      truncated: result.truncated,
+      status: changed.status,
+      reason: result.unavailable ? "git_unavailable" : "command_failed",
+      message: "Git diff could not be read for this file.",
+      ...(git.branch ? { branch: git.branch } : {}),
+    }
+  }
+  return {
+    path: target.relativePath,
+    available: Boolean(result.stdout),
+    content: result.stdout,
+    truncated: result.truncated,
+    status: changed.status,
+    ...(git.branch ? { branch: git.branch } : {}),
+    ...(!result.stdout ? { reason: "unchanged" as const, message: "Git reported no textual diff for this file." } : {}),
+  }
+}
+
+async function gitDiffFromHead(root: string, path: string): Promise<GitCommandResult> {
+  const fromHead = await runGit(
+    root,
+    ["diff", "--no-ext-diff", "--no-color", "--relative", "HEAD", "--", path],
+    MAX_GIT_DIFF_BYTES,
+  )
+  if (fromHead.ok) return fromHead
+
+  const [staged, workingTree] = await Promise.all([
+    runGit(root, ["diff", "--cached", "--no-ext-diff", "--no-color", "--relative", "--", path], MAX_GIT_DIFF_BYTES),
+    runGit(root, ["diff", "--no-ext-diff", "--no-color", "--relative", "--", path], MAX_GIT_DIFF_BYTES),
+  ])
+  if (!staged.ok || !workingTree.ok) return fromHead
+  return {
+    ok: true,
+    exitCode: 0,
+    stdout: [staged.stdout, workingTree.stdout].filter(Boolean).join("\n"),
+    stderr: "",
+    truncated: staged.truncated || workingTree.truncated,
+    unavailable: false,
+  }
+}
+
+type GitCommandResult = {
+  ok: boolean
+  exitCode: number
+  stdout: string
+  stderr: string
+  truncated: boolean
+  unavailable: boolean
+}
+
+async function runGit(
+  root: string,
+  args: string[],
+  maxBytes: number,
+  acceptedExitCodes: number[] = [0],
+  input?: string,
+): Promise<GitCommandResult> {
+  let child: ReturnType<typeof Bun.spawn>
+  try {
+    child = Bun.spawn({
+      cmd: ["git", "--no-optional-locks", "--literal-pathspecs", ...args],
+      cwd: root,
+      env: gitCommandEnvironment(),
+      stdin: input === undefined ? "ignore" : Buffer.from(input, "utf8"),
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+  } catch {
+    return { ok: false, exitCode: -1, stdout: "", stderr: "", truncated: false, unavailable: true }
+  }
+  const timeout = setTimeout(() => child.kill(), GIT_TIMEOUT_MS)
+  try {
+    const [stdout, stderr, exitCode] = await Promise.all([
+      readLimitedOutput(child.stdout as ReadableStream<Uint8Array>, maxBytes),
+      readLimitedOutput(child.stderr as ReadableStream<Uint8Array>, 32 * 1024),
+      child.exited,
+    ])
+    return {
+      ok: acceptedExitCodes.includes(exitCode),
+      exitCode,
+      stdout: stdout.text,
+      stderr: stderr.text,
+      truncated: stdout.truncated || stderr.truncated,
+      unavailable: false,
+    }
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+function gitCommandEnvironment() {
+  const env = { ...process.env }
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("GIT_")) delete env[key]
+  }
+  return {
+    ...env,
+    GIT_ATTR_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_PAGER: "cat",
+    GIT_TERMINAL_PROMPT: "0",
+    LC_ALL: "C",
+  }
+}
+
+async function readLimitedOutput(stream: ReadableStream<Uint8Array>, maxBytes: number) {
+  const reader = stream.getReader()
+  const decoder = new TextDecoder()
+  let text = ""
+  let storedBytes = 0
+  let truncated = false
+  while (true) {
+    const chunk = await reader.read()
+    if (chunk.done) break
+    const remaining = Math.max(0, maxBytes - storedBytes)
+    if (remaining > 0) {
+      const stored = chunk.value.subarray(0, remaining)
+      text += decoder.decode(stored, { stream: true })
+      storedBytes += stored.byteLength
+    }
+    if (chunk.value.byteLength > remaining) truncated = true
+  }
+  text += decoder.decode()
+  return { text, truncated }
+}
+
 async function uploadSessionFiles(session: SessionRecord, request: Request) {
   const form = await request.formData()
   const uploads: UiFileSummary[] = []
-  const currentUploadBytes = await sessionUploadBytes(session.cwd)
-  let nextUploadBytes = currentUploadBytes
-  const uploadRoot = join(session.cwd, "uploads")
-  await mkdir(uploadRoot, { recursive: true })
-  const guard = new PathGuard({ workspaceRoot: session.cwd, workspaceOnly: true })
+  await mkdir(session.cwd, { recursive: true })
+  const uploadRoot = await resolveWorkspaceTarget(session.cwd, "uploads", { allowMissing: true })
+  await mkdir(uploadRoot.absolutePath, { recursive: true })
+  await resolveWorkspaceTarget(session.cwd, "uploads")
+  let nextUploadBytes = await sessionUploadBytes(session.cwd)
   for (const value of form.getAll("files")) {
     if (!(value instanceof File)) continue
     if (value.size > MAX_UPLOAD_FILE_BYTES) {
@@ -1520,7 +2853,7 @@ async function uploadSessionFiles(session: SessionRecord, request: Request) {
       throw new PixiuError("Session uploads exceed the 100 MB limit.", { code: "UPLOAD_TOO_LARGE" })
     }
     const safeName = safeUploadName(value.name)
-    const target = guard.resolvePath(join("uploads", safeName))
+    const target = await resolveWorkspaceTarget(session.cwd, join("uploads", safeName), { allowMissing: true })
     await writeFile(target.absolutePath, Buffer.from(await value.arrayBuffer()))
     const info = await stat(target.absolutePath)
     uploads.push({
@@ -1578,9 +2911,7 @@ async function walkSessionFiles(root: string, current: string, files: UiFileSumm
 }
 
 async function readSessionFileContent(session: SessionRecord, path: string) {
-  if (!path.trim()) throw new PixiuError("path is required", { code: "FILE_PATH_REQUIRED" })
-  const guard = new PathGuard({ workspaceRoot: session.cwd, workspaceOnly: true })
-  const target = guard.resolvePath(path)
+  const target = await resolveWorkspaceTarget(session.cwd, path)
   const info = await stat(target.absolutePath)
   if (info.size > 512 * 1024) throw new PixiuError("File is too large to preview.", { code: "FILE_TOO_LARGE" })
   if (!isTextLikePath(target.relativePath)) throw new PixiuError("Only text files can be previewed.", { code: "FILE_NOT_TEXT" })
@@ -1761,14 +3092,48 @@ function statusForError(error: unknown) {
       "FILE_TOO_LARGE",
       "FILE_NOT_TEXT",
       "PATH_OUTSIDE_WORKSPACE",
+      "WORKSPACE_FILE_NOT_FOUND",
+      "WORKSPACE_PATH_NOT_FILE",
+      "WORKSPACE_ROOT_UNAVAILABLE",
       "UPLOAD_TOO_LARGE",
       "PROVIDER_API_KEY_MISSING",
       "PROJECT_ROOT_INVALID",
       "FS_PATH_INVALID",
+      "WORKSPACE_CHANGE_REQUEST_INVALID",
+      "WORKSPACE_CHANGE_SELECTION_INVALID",
+      "WORKSPACE_CHANGE_PATH_RESERVED",
+      "WORKSPACE_CHANGE_NOT_FOUND",
+      "WORKSPACE_HUNK_NOT_FOUND",
+      "WORKSPACE_HUNKS_UNAVAILABLE",
+      "WORKSPACE_COMMIT_MESSAGE_INVALID",
+      "WORKSPACE_VALIDATION_KEY_INVALID",
+      "WORKSPACE_VALIDATION_KIND_INVALID",
+      "WORKSPACE_VALIDATION_COMMAND_INVALID",
+      "WORKSPACE_VALIDATION_PRESET_OVERRIDE",
+      "WORKSPACE_VALIDATION_PRESET_UNAVAILABLE",
+      "WORKSPACE_VALIDATION_CONFIRMATION_REQUIRED",
     ].includes(error.code)
   ) {
     return 400
   }
+  if (
+    error instanceof PixiuError &&
+    [
+      "SESSION_RUN_ACTIVE",
+      "WORKSPACE_CHANGE_STALE",
+      "WORKSPACE_CHANGE_CONFLICT",
+      "WORKSPACE_CHANGE_ALREADY_APPLIED",
+      "WORKSPACE_CHANGE_NOT_APPLIED",
+      "WORKSPACE_CHANGE_NOT_STAGED",
+      "WORKSPACE_UNDO_EMPTY",
+      "WORKSPACE_COMMIT_EMPTY",
+      "WORKSPACE_COMMIT_SCOPE_CONFLICT",
+      "SESSION_WORKSPACE_UNAVAILABLE",
+    ].includes(error.code)
+  ) {
+    return 409
+  }
+  if (error instanceof PixiuError && ["TURN_NOT_FOUND", "SESSION_NOT_FOUND"].includes(error.code)) return 404
   return 500
 }
 

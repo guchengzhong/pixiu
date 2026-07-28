@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test"
-import { readFile, mkdtemp } from "node:fs/promises"
+import { mkdir, readFile, mkdtemp } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
 import { buildRuntime } from "../../src/runtime/build"
 import { defaultConfig } from "../../src/config/defaults"
 import { ScriptedLLMClient } from "../fixtures/scripted-llm"
+import { loadSessionWorkspaceBinding } from "../../src/workspace/session"
 
 function configWithMissingKey() {
   return {
@@ -71,11 +72,14 @@ describe("runtime build", () => {
 
   test("runs new sessions inside workspace session directories", async () => {
     const root = await mkdtemp(join(tmpdir(), "pixiu-workspace-runtime-"))
+    const projectRoot = join(root, "project")
+    const stateRoot = join(root, "state")
+    await mkdir(projectRoot)
     const runtime = await buildRuntime({
-      cwd: root,
+      cwd: projectRoot,
       config: {
         ...defaultConfig,
-        sandbox: { ...defaultConfig.sandbox, mode: "workspace", workspaceDir: "workspace" },
+        sandbox: { ...defaultConfig.sandbox, mode: "workspace", workspaceDir: stateRoot },
       },
       yes: true,
       llm: new ScriptedLLMClient([
@@ -96,8 +100,16 @@ describe("runtime build", () => {
     expect(created?.type).toBe("session_created")
     const sessionId = created!.sessionId
     const session = await runtime.sessions.getSession(sessionId)
+    const binding = await loadSessionWorkspaceBinding({ stateRoot, projectRoot, sessionId })
 
-    expect(session?.cwd).toBe(join(root, "workspace", sessionId))
-    expect(await readFile(join(root, "workspace", sessionId, "result.md"), "utf8")).toBe("# Result\n\nok")
+    expect(session?.cwd).toBe(binding.workRoot)
+    expect(session?.metadata).toMatchObject({
+      sandboxMode: "workspace",
+      workspaceDir: binding.workRoot,
+      workspaceStateRoot: stateRoot,
+      workspaceProjectRoot: projectRoot,
+    })
+    expect(await readFile(join(binding.workRoot, "result.md"), "utf8")).toBe("# Result\n\nok")
+    await expect(readFile(join(projectRoot, "result.md"), "utf8")).rejects.toThrow()
   })
 })

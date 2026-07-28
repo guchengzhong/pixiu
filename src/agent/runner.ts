@@ -2,7 +2,7 @@ import { createID } from "../shared/id"
 import { stripToolActivityInput } from "../activity/format"
 import { formatError } from "../shared/errors"
 import type { LLMClient, LLMMessage } from "../llm/types"
-import type { SessionRecord, SessionStore } from "../session/types"
+import type { SessionFileReference, SessionRecord, SessionStore } from "../session/types"
 import { toLLMMessages } from "../session/format"
 import type { ToolContext } from "../tools/types"
 import type { ToolRegistry } from "../tools/registry"
@@ -45,7 +45,7 @@ export type AgentRunnerOptions = {
 export class AgentRunner {
   constructor(private readonly options: AgentRunnerOptions) {}
 
-  async *run(input: { message: string; sessionId?: string; title?: string; signal?: AbortSignal }): AsyncIterable<AgentEvent> {
+  async *run(input: { message: string; sessionId?: string; title?: string; turnId?: string; references?: SessionFileReference[]; signal?: AbortSignal }): AsyncIterable<AgentEvent> {
     const session =
       input.sessionId && (await this.options.sessions.getSession(input.sessionId))
         ? (await this.options.sessions.getSession(input.sessionId))!
@@ -55,8 +55,12 @@ export class AgentRunner {
 
     await this.options.sessions.appendMessage({
       sessionId: session.id,
+      ...(input.turnId ? { turnId: input.turnId } : {}),
       role: "user",
-      parts: [{ type: "text", text: input.message }],
+      parts: [
+        ...(input.message ? [{ type: "text" as const, text: input.message }] : []),
+        ...(input.references ?? []).map((reference) => ({ type: "file_reference" as const, ...reference })),
+      ],
     })
 
     const continuationMessages: LLMMessage[] = []
@@ -123,6 +127,7 @@ export class AgentRunner {
           if (event.type === "error") {
             await this.options.sessions.appendMessage({
               sessionId: session.id,
+              ...(input.turnId ? { turnId: input.turnId } : {}),
               role: "assistant",
               parts: [
                 ...(assistantText ? [{ type: "text" as const, text: assistantText }] : []),
@@ -142,6 +147,7 @@ export class AgentRunner {
         const message = formatError(error)
         await this.options.sessions.appendMessage({
           sessionId: session.id,
+          ...(input.turnId ? { turnId: input.turnId } : {}),
           role: "assistant",
           parts: [{ type: "error", message }],
         })
@@ -153,6 +159,7 @@ export class AgentRunner {
       if (toolCalls.length) {
         await this.options.sessions.appendMessage({
           sessionId: session.id,
+          ...(input.turnId ? { turnId: input.turnId } : {}),
           role: "assistant",
           parts: [
             ...(assistantText ? [{ type: "text" as const, text: assistantText }] : []),
@@ -163,7 +170,8 @@ export class AgentRunner {
         draftContinuations = 0
 
         const persistedCallIds = new Set<string>()
-        for (const call of toolCalls) {
+        for (let callIndex = 0; callIndex < toolCalls.length; callIndex += 1) {
+          const call = toolCalls[callIndex]!
           const signal = input.signal ?? this.options.signal
           if (signal?.aborted) {
             // Persist a result for every declared tool_call before bailing out, so the
@@ -201,6 +209,7 @@ export class AgentRunner {
           }
           await this.options.sessions.appendMessage({
             sessionId: session.id,
+            ...(input.turnId ? { turnId: input.turnId } : {}),
             role: "tool",
             parts: [{ type: "tool_result", toolCallId: call.id, name: call.name, result }],
           })
@@ -218,7 +227,43 @@ export class AgentRunner {
             await this.options.sessions.updateTodos(session.id, todoEvent.todos)
             yield todoEvent
           }
-          const autoInstallEvents = await this.autoInstallManagedToolIfAllowed(skillRouteState, session, input.signal ?? this.options.signal)
+          if (result.metadata && "userActionRequired" in result.metadata && result.metadata.userActionRequired === true) {
+            for (const skippedCall of toolCalls.slice(callIndex + 1)) {
+              const skippedResult = {
+                ok: false,
+                content: "Skipped because the run is waiting for required user action.",
+                metadata: { userActionRequired: true, skipped: true },
+              }
+              await this.options.sessions.appendMessage({
+                sessionId: session.id,
+                ...(input.turnId ? { turnId: input.turnId } : {}),
+                role: "tool",
+                parts: [{ type: "tool_result", toolCallId: skippedCall.id, name: skippedCall.name, result: skippedResult }],
+              })
+              yield {
+                type: "tool_result",
+                id: skippedCall.id,
+                name: skippedCall.name,
+                ok: false,
+                content: skippedResult.content,
+                metadata: skippedResult.metadata,
+              }
+            }
+            const message = result.content.trim()
+            if (message) {
+              await this.options.sessions.appendMessage({
+                sessionId: session.id,
+                ...(input.turnId ? { turnId: input.turnId } : {}),
+                role: "assistant",
+                parts: [{ type: "text", text: message }],
+              })
+              yield { type: "llm_text_delta", text: message }
+              yield { type: "message", role: "assistant", content: message }
+            }
+            yield { type: "finish", reason: "user_action_required", sessionId: session.id }
+            return
+          }
+          const autoInstallEvents = await this.autoInstallManagedToolIfAllowed(skillRouteState, session, input.signal ?? this.options.signal, input.turnId)
           for (const autoInstallEvent of autoInstallEvents) yield autoInstallEvent
         }
         continue
@@ -228,6 +273,7 @@ export class AgentRunner {
       if (finalAnswer !== undefined) {
         await this.options.sessions.appendMessage({
           sessionId: session.id,
+          ...(input.turnId ? { turnId: input.turnId } : {}),
           role: "assistant",
           parts: [{ type: "text", text: finalAnswer }],
         })
@@ -242,6 +288,7 @@ export class AgentRunner {
           const message = "LLM returned an empty response without tool calls."
           await this.options.sessions.appendMessage({
             sessionId: session.id,
+            ...(input.turnId ? { turnId: input.turnId } : {}),
             role: "assistant",
             parts: [{ type: "error", message, code: "EMPTY_LLM_RESPONSE" }],
           })
@@ -263,6 +310,7 @@ export class AgentRunner {
         const fallbackAnswer = parseFinalAnswer(assistantText) ?? assistantText.trim()
         await this.options.sessions.appendMessage({
           sessionId: session.id,
+          ...(input.turnId ? { turnId: input.turnId } : {}),
           role: "assistant",
           parts: [{ type: "text", text: fallbackAnswer }],
         })
@@ -286,6 +334,7 @@ export class AgentRunner {
     const message = `Stopped after maxSteps=${this.options.maxSteps}`
     await this.options.sessions.appendMessage({
       sessionId: session.id,
+      ...(input.turnId ? { turnId: input.turnId } : {}),
       role: "assistant",
       id: createID("msg"),
       parts: [{ type: "error", message, code: "MAX_STEPS" }],
@@ -326,6 +375,7 @@ export class AgentRunner {
     state: SkillRouteState,
     session: SessionRecord,
     signal: AbortSignal | undefined,
+    turnId?: string,
   ): Promise<AgentEvent[]> {
     const blocker = state.blockers.find(
       (item): item is Extract<SkillRouteBlocker, { kind: "missing_managed_tool" }> =>
@@ -352,6 +402,7 @@ export class AgentRunner {
     } satisfies JsonObject
     await this.options.sessions.appendMessage({
       sessionId: session.id,
+      ...(turnId ? { turnId } : {}),
       role: "assistant",
       parts: [{ type: "tool_call", id, name: "shell", input: stripToolActivityInput(input) }],
     })
@@ -391,6 +442,7 @@ export class AgentRunner {
     updateSkillRouteState(state, "shell", stripToolActivityInput(input), result.ok, result.content, result.metadata)
     await this.options.sessions.appendMessage({
       sessionId: session.id,
+      ...(turnId ? { turnId } : {}),
       role: "tool",
       parts: [{ type: "tool_result", toolCallId: id, name: "shell", result }],
     })

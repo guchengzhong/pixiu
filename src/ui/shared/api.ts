@@ -1,7 +1,7 @@
 import type { PixiuConfig } from "../../config/defaults"
 import type { JsonValue } from "../../shared/json"
 import type { SessionEvidence } from "../../session/evidence"
-import type { SessionMessage } from "../../session/types"
+import type { SessionMessage, SessionTurn } from "../../session/types"
 import type { AgentEvent } from "../../agent/events"
 import type { ActivityItem, ActivityUpdatedEvent } from "../../activity/types"
 import type { TodoItem } from "../../todo/types"
@@ -112,6 +112,172 @@ export type UiFileSummary = {
   kind: "text" | "binary"
 }
 
+export type UiPromptFileReference = {
+  path: string
+  source: "uploaded" | "workspace" | "generated" | "evidence"
+  startLine?: number
+  endLine?: number
+}
+
+export type UiWorkspaceChangeStatus =
+  | "added"
+  | "copied"
+  | "deleted"
+  | "modified"
+  | "renamed"
+  | "type-changed"
+  | "untracked"
+  | "conflicted"
+
+export type UiWorkspaceChangedFile = {
+  path: string
+  status: UiWorkspaceChangeStatus
+  indexStatus: string
+  workingTreeStatus: string
+  originalPath?: string
+}
+
+export type UiWorkspaceEntry = {
+  path: string
+  name: string
+  parentPath: string
+  type: "directory" | "file" | "symlink"
+  size?: number
+  updatedAt?: string
+  kind?: "text" | "binary"
+  gitStatus?: UiWorkspaceChangeStatus
+}
+
+export type UiWorkspaceGitSummary = {
+  available: boolean
+  changedFiles: UiWorkspaceChangedFile[]
+  branch?: string
+  reason?: "not_repository" | "git_unavailable" | "command_failed"
+  message?: string
+  truncated?: boolean
+}
+
+export type UiWorkspaceSnapshot = {
+  available: boolean
+  projectId: string
+  projectName: string
+  rootPath: string
+  entries: UiWorkspaceEntry[]
+  truncated: boolean
+  git: UiWorkspaceGitSummary
+  message?: string
+}
+
+export type UiWorkspaceFileContent = {
+  path: string
+  size: number
+  updatedAt: string
+  content: string
+}
+
+export type UiWorkspaceDiff = {
+  path: string
+  available: boolean
+  content: string
+  truncated: boolean
+  status?: UiWorkspaceChangeStatus
+  branch?: string
+  reason?: "not_repository" | "git_unavailable" | "command_failed" | "unchanged"
+  message?: string
+}
+
+export type UiChangeSetStatus = "added" | "deleted" | "modified" | "type-changed"
+
+export type UiChangeSetHunk = {
+  id: string
+  header: string
+  oldStart: number
+  oldLines: number
+  newStart: number
+  newLines: number
+  content: string
+}
+
+export type UiChangeSetFile = {
+  path: string
+  status: UiChangeSetStatus
+  binary: boolean
+  size: number
+  hunkCount: number
+  additions: number
+  deletions: number
+  appliedHunkIds: string[]
+  applied: boolean
+  staged: boolean
+  committed: boolean
+}
+
+export type UiChangeSetSnapshot = {
+  available: boolean
+  sessionId: string
+  projectId?: string
+  projectRoot?: string
+  createdAt?: string
+  baseRevision?: string
+  workRevision?: string
+  revision?: string
+  changes: UiChangeSetFile[]
+  canUndo: boolean
+  message?: string
+}
+
+export type UiChangeSetDiff = {
+  path: string
+  available: boolean
+  status?: UiChangeSetStatus
+  revision?: string
+  binary: boolean
+  content: string
+  hunks: UiChangeSetHunk[]
+  truncated: boolean
+  message?: string
+}
+
+export type UiChangeSelection = {
+  path: string
+  hunkIds?: string[]
+}
+
+export type UiChangeOperation = {
+  id: string
+  action: "apply" | "discard" | "undo" | "stage" | "unstage" | "commit"
+  paths: string[]
+  createdAt: string
+  revision?: string
+  selections?: UiChangeSelection[]
+  commit?: string
+  message?: string
+}
+
+export type UiChangeMutationResult = {
+  operation: UiChangeOperation
+  changes: UiChangeSetSnapshot
+}
+
+export type UiValidationKind = "test" | "typecheck" | "build" | "custom"
+
+export type UiValidationRecord = {
+  id: string
+  sessionId: string
+  turnId: string
+  revision: string
+  kind: UiValidationKind
+  command: string
+  status: "passed" | "failed" | "cancelled"
+  startedAt: string
+  completedAt: string
+  durationMs: number
+  exitCode: number
+  output: string
+  truncated: boolean
+  timedOut: boolean
+}
+
 export type UiSessionDetail = {
   session: UiSessionSummary
   messages: SessionMessage[]
@@ -119,6 +285,8 @@ export type UiSessionDetail = {
   files: UiFileSummary[]
   todos: TodoItem[]
   activity: ActivityItem[]
+  turns: SessionTurn[]
+  validations: UiValidationRecord[]
 }
 
 export type UiSkillSummary = SkillSummary & {
@@ -145,8 +313,17 @@ export type UiRunEvent =
 
 export type UiRunResult = {
   runId: string
+  turnId: string
   status: TerminalRunStatus
   sessionId?: string
+  model?: string
+  startedAt: string
+  completedAt?: string
+  durationMs?: number
+  inputTokens?: number
+  outputTokens?: number
+  retryCount: number
+  retryOf?: string
   answer: string
   finishReason: string
   events: AgentEvent[]

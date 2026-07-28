@@ -1,296 +1,143 @@
 # Pixiu Workbench UI Layout Spec
 
-This reference file describes the target Pixiu frontend layout in more concrete detail.
+This reference describes the target Pixiu browser workbench.
 
-## Page structure
+## Page Structure
 
-Use a desktop-first three-pane layout:
+Use a desktop-first workbench with two persistent regions. The inspector is
+contextual and must not permanently compete with the conversation for space.
 
-```txt
-┌──────────────────────────────────────────────────────────────┐
-│ Top Bar: project, model, permission mode, status              │
-├───────────────┬────────────────────────────┬─────────────────┤
-│ Left Sidebar  │ Center Workbench           │ Right Inspector │
-│               │                            │                 │
-│ Projects      │ Chat messages              │ Activity        │
-│ Sessions      │ Assistant cards            │ Tools           │
-│ Skills        │ Artifacts                   │ Skills          │
-│ MCP           │ File changes                │ Evidence        │
-│ Workspace     │ Composer                    │ Workspace       │
-└───────────────┴────────────────────────────┴─────────────────┘
+```text
++--------------+-----------------------------------------------+
+| Left sidebar | Top bar: context, model, status, inspector    |
+|              +-----------------------------+-----------------+
+| Projects     | Conversation                | Inspector       |
+| Sessions     |                             | when opened     |
+| Workspace    | Messages                    | Activity        |
+| Skills / MCP | Inline tools and artifacts  | Changes         |
+| Settings     | Composer                    | Files           |
++--------------+-----------------------------+-----------------+
 ```
+
+The outer shell owns only the sidebar and main area. The inspector belongs to
+the main content grid, starts closed, remembers its width, and becomes an
+overlay at constrained widths.
 
 ## Left Sidebar
 
-The sidebar should help users understand where they are.
+The sidebar should help users understand where they are without becoming a
+second dashboard.
 
 Recommended sections:
 
-1. Primary actions
+1. New chat and session search
+2. Projects
+3. Sessions for the selected project
+4. Workspace, Skills, MCP, Projects, and Settings navigation
 
-   * New chat
-   * Search sessions
-
-2. Navigation
-
-   * Projects
-   * Skills
-   * MCP
-   * Workspace
-   * Settings
-
-3. Projects
-
-   * KVenture
-   * Maze
-   * pixiu
-
-4. Sessions for selected project
-
-   * 260614 pixiu skills
-   * frontend redesign
-   * systematic debugging
-   * skill architecture refactor
-   * MCP integration plan
-
-5. User area
-
-   * avatar
-   * account/name
-   * settings dropdown
+Project and session actions belong in compact menus. The sidebar can collapse
+to an icon rail on wide screens. At constrained widths it becomes a drawer.
 
 ## Center Workbench
 
-The center area is the main task surface.
+The center is the primary task surface. A response may include:
 
-A good assistant response may include:
+1. A natural-language answer rendered as Markdown
+2. Readable lists, tables, links, and highlighted code
+3. Collapsible tool calls attached to the assistant turn that produced them
+4. File references and artifacts attached to the same turn
+5. A clear pending, failure, or permission state when applicable
 
-1. Short natural-language response
-2. Structured summary cards
-3. Artifact preview
-4. File changes
-5. Verification status
-
-Example summary cards:
-
-### Skills used
-
-Show loaded or relevant skills:
-
-* systematic-debugging
-* frontend-design
-* skill-creator
-
-Each row may include:
-
-* skill name
-* short description
-* status
-* version or source path if available
-
-### Files changed / proposed
-
-Show proposed or modified files:
-
-* `layout/workbench.tsx`
-* `components/Sidebar.tsx`
-* `components/ChatPane.tsx`
-* `components/RightInspector.tsx`
-* `styles/tokens.css`
-
-Each row may include:
-
-* file path
-* status: added, updated, deleted, unchanged
-* whether it is mock-only or real integration
-
-### MCP & Tools
-
-Show tool usage:
-
-* read_file
-* edit
-* shell
-* web_fetch
-* MCP server calls
-
-Each row may include call count and status.
-
-### Artifact preview
-
-Show generated UI preview, report, document, image, or code artifact.
-
-Useful actions:
-
-* Copy
-* Save as Artifact
-* Open
-* View full size
-* Download if applicable
+Do not render empty summary-card grids below every response. Skills, MCP, and
+project management belong in dedicated workbench views. Workspace state and
+long execution details belong in the inspector.
 
 ## Right Inspector
 
-The right inspector is Pixiu's observability surface.
+The inspector is Pixiu's observability and workspace surface. It has three
+tabs:
 
-Recommended tabs:
+### Activity
 
-* Activity
-* Tools
-* Skills
-* Evidence
-* Workspace
+Show structured task progress first and keep raw execution details in a
+secondary disclosure. Each event may expose status, label, detail, and error
+state.
 
-### Activity tab
+### Changes
 
-Show a timeline of structured execution events.
+Show the configured project root, Git branch, changed files, structured status,
+and a single-file diff. Support staged, unstaged, untracked, deleted, renamed,
+type-changed, and conflicted states.
 
-Example:
+### Files
 
-1. Parsed task
-2. Selected skill: frontend-design
-3. Loaded SKILL.md
-4. Loaded reference: ui-guidelines.md
-5. Called tool: read_file
-6. Generated layout proposal
-7. Waiting for user confirmation
+Show a collapsible project file tree, safe text preview, and actions to copy or
+reference a path in chat. Session uploads, generated artifacts, and evidence
+remain available in a secondary disclosure.
 
-Each event should have:
-
-* icon or status
-* label
-* optional timestamp
-* optional detail count
-* status: pending, running, success, failed, blocked
-
-### Tools tab
-
-Show tool calls grouped by tool name.
-
-Example:
-
-* read_file: 12 calls
-* edit: 8 calls
-* shell: 2 calls
-* web_fetch: 2 calls
-
-For repeated calls, group them and allow expansion later.
-
-### Skills tab
-
-Show selected, loaded, and available skills.
-
-Example:
-
-* frontend-design: loaded
-* skill-creator: available
-* systematic-debugging: used previously
-
-The UI should make it clear that a skill guides behavior but does not directly execute actions.
-
-### Evidence tab
-
-Show supporting evidence:
-
-* files read
-* logs
-* command output
-* screenshots
-* generated artifacts
-* citations if web tools were used
-
-### Workspace tab
-
-Show local workspace status:
-
-* root directory
-* current branch
-* changed files
-* artifacts
-* session workspace path
-* permission mode
+The inspector can collapse and resize on wide screens. Its size must not alter
+the outer page width or cause horizontal overflow.
 
 ## Top Bar
 
-Recommended top bar elements:
+Keep the top bar compact:
 
-* current project name
+* current project and conversation
 * current model
-* permission mode
-* run status
-* share/export
-* more menu
+* one run-status indicator
+* inspector toggle
 
-Example status labels:
-
-* Ready
-* Running
-* Waiting for permission
-* Failed
-* Completed
+Keep permission mode in the composer, where it directly affects the next run.
+Avoid a row of status pills.
 
 ## Composer
 
-The bottom composer should support:
+The composer supports:
 
-* text input
-* file attachment
-* slash commands
-* send button
-* optional microphone button
-* visible placeholder
+* a self-sizing text input
+* file attachment and referenced-file removal
+* permission mode
+* send
+* stop while a run is active
 
-Example placeholder:
+Enter submits, Shift+Enter inserts a newline, and IME composition must never
+submit prematurely.
 
-“给 Pixiu 设计一个新的前端页面...”
-
-## Visual style
+## Visual Style
 
 Prefer:
 
-* light theme first
-* white cards
-* soft gray borders
-* subtle shadows
-* blue or teal primary accent
-* small orange/gold Pixiu accent
-* clear status colors
-* 8px or 12px radius
-* consistent spacing
-* readable font size
+* a light neutral canvas with clear surface hierarchy
+* quiet gray borders and restrained shadows
+* one blue interaction accent plus semantic success, warning, and danger colors
+* 8px maximum radius for cards and panels
+* compact controls and consistent spacing
+* visible keyboard focus
 
 Avoid:
 
-* heavy gradients
-* excessive mascot decoration
-* crowded text
-* unclear icons
-* too many colors
-* hidden important state
+* heavy gradients or decorative background shapes
+* nested cards and empty card walls
+* oversized headings inside work surfaces
+* unclear icon-only actions
+* hidden execution state
 
-## Responsive behavior
+## Responsive Behavior
 
-First optimize for desktop 16:9.
+Validate at 1440x900, 1024x768, and 390x844.
 
-Minimum responsive behavior:
+Minimum behavior:
 
-* left sidebar can collapse
-* right inspector can collapse
-* center workbench remains readable
-* cards stack if width is limited
+* the center conversation remains the primary surface
+* navigation and inspector become independent drawers below the workbench breakpoint
+* closed drawers are not focusable or pointer-interactive
+* the top bar and composer remain single-purpose and do not overlap
+* Markdown tables, code, file paths, trees, and diffs scroll locally
+* the document itself has no horizontal overflow
+* use dynamic viewport height and mobile safe-area insets
 
-## Implementation notes
+## Implementation Notes
 
-If real runtime data is not available yet, use mock data.
-
-Keep mock data easy to replace:
-
-* `mockProjects`
-* `mockSessions`
-* `mockMessages`
-* `mockSkills`
-* `mockActivityEvents`
-* `mockToolCalls`
-* `mockWorkspace`
-* `mockArtifacts`
-
-Do not hard-code mock data deeply inside presentation components if avoidable.
+Prefer existing project, session, activity, workspace, Git, and evidence APIs.
+Do not add mock data to production presentation components. Deterministic
+fixtures belong only in tests.

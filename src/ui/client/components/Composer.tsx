@@ -1,4 +1,5 @@
-import type { RefObject } from "react"
+import { ArrowUp, Paperclip, ShieldCheck, Square, X } from "lucide-react"
+import { useEffect, useRef, type RefObject } from "react"
 
 import { isActiveRunStatus, type RunStatus } from "../../../run/status"
 import { formatSize, maybeSend } from "../helpers"
@@ -38,7 +39,16 @@ export function Composer({
   onRemoveAttachment(reference: FileReference): void
 }) {
   const active = isActiveRunStatus(runStatus)
-  const canSend = Boolean(prompt.trim() || attachments.length) && !active
+  const awaitingResult = Boolean(runId)
+  const canSend = Boolean(prompt.trim() || attachments.length) && !active && !awaitingResult
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    textarea.style.height = "auto"
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 192)}px`
+  }, [prompt])
 
   return (
     <div className="composer-shell">
@@ -48,10 +58,10 @@ export function Composer({
             {attachments.map((attachment) => (
               <span
                 className="attachment-chip file-reference-chip"
-                key={`${attachment.source}:${attachment.path}`}
+                key={`${attachment.source}:${attachment.path}:${attachment.startLine ?? ""}:${attachment.endLine ?? ""}`}
               >
-                <button className="attachment-preview" type="button" title={`Preview ${attachment.path}`} onClick={() => onPreviewAttachment(attachment)}>
-                  <span className="attachment-name">{attachment.name}</span>
+                <button className="attachment-preview" type="button" title={`Preview ${fileReferenceLabel(attachment)}`} onClick={() => onPreviewAttachment(attachment)}>
+                  <span className="attachment-name">{fileReferenceLabel(attachment)}</span>
                   <span className="attachment-meta">
                     {attachment.source} · {attachment.size !== undefined ? formatSize(attachment.size) : attachment.kind ?? "file"} · {attachment.status}
                   </span>
@@ -60,20 +70,23 @@ export function Composer({
                   className="attachment-remove"
                   type="button"
                   title="Remove reference from this message"
+                  aria-label={`Remove ${attachment.name} from this message`}
                   onClick={() => onRemoveAttachment(attachment)}
                 >
-                  x
+                  <X aria-hidden="true" />
                 </button>
               </span>
             ))}
           </div>
         ) : null}
         <textarea
+          ref={textareaRef}
           value={prompt}
           onChange={(event) => setPrompt(event.currentTarget.value)}
           onKeyDown={(event) => void maybeSend(event, sendPrompt)}
           placeholder="Message Pixiu"
-          rows={2}
+          aria-label="Message Pixiu"
+          rows={1}
         />
         {uploadError ? <div className="upload-error">{uploadError}</div> : null}
         <div className="composer-row">
@@ -90,20 +103,29 @@ export function Composer({
                 })
               }}
             />
-            <button className="icon-button" type="button" title="Upload files" onClick={() => fileInputRef.current?.click()}>+</button>
-            <select className="select" value={permissionMode} onChange={(event) => setPermissionMode(event.currentTarget.value)} title="Permission mode">
-              <option value="acceptEdits">accept edits</option>
-              <option value="default">default</option>
-              <option value="plan">plan</option>
-              <option value="bypassPermissions">bypass</option>
-            </select>
+            <button className="icon-button" type="button" aria-label="Attach files" title="Attach files" onClick={() => fileInputRef.current?.click()}><Paperclip aria-hidden="true" /></button>
+            <label className="permission-select" title="Permission mode">
+              <ShieldCheck aria-hidden="true" />
+              <span className="sr-only">Permission mode</span>
+              <select className="select" value={permissionMode} onChange={(event) => setPermissionMode(event.currentTarget.value)} aria-label="Permission mode">
+                <option value="acceptEdits">Accept edits</option>
+                <option value="default">Ask</option>
+                <option value="plan">Plan</option>
+                <option value="bypassPermissions">Bypass</option>
+              </select>
+            </label>
             {permissionMode === "bypassPermissions" ? <span className="warning">bypass enabled</span> : null}
             <span className={`run-status run-status-${runStatus}`}>{runStatusLabel}</span>
           </div>
-          {runId && active ? <button className="ghost" type="button" onClick={() => void cancelRun()}>Cancel</button> : null}
-          <button className="send" type="button" title={active ? runStatusLabel : "Send"} disabled={!canSend} onClick={() => void sendPrompt()}>↑</button>
+          {runId && active ? <button className="stop-run" type="button" aria-label="Stop run" title="Stop run" onClick={() => void cancelRun()}><Square aria-hidden="true" /></button> : null}
+          <button className="send" type="button" aria-label={active || awaitingResult ? runStatusLabel : "Send message"} title={active || awaitingResult ? runStatusLabel : "Send message"} disabled={!canSend} onClick={() => void sendPrompt()}><ArrowUp aria-hidden="true" /></button>
         </div>
       </div>
     </div>
   )
+}
+
+function fileReferenceLabel(reference: FileReference) {
+  const range = reference.startLine === undefined ? "" : `:${reference.startLine}-${reference.endLine ?? reference.startLine}`
+  return `@${reference.path}${range}`
 }

@@ -58,6 +58,15 @@ export function resolveProviderConfig(config: PixiuConfig, name = "openai-compat
 export function validateConfig(config: PixiuConfig) {
   const actions = new Set<PermissionAction>(["allow", "ask", "deny"])
   if (!config.model) throw new PixiuError("config.model is required", { code: "CONFIG_INVALID" })
+  if (!isRecord(config.project) || !isRecord(config.project.commands)) {
+    throw new PixiuError("config.project.commands must contain an object", { code: "CONFIG_INVALID" })
+  }
+  for (const name of ["test", "typecheck", "build"] as const) {
+    const command = config.project.commands[name]
+    if (command !== undefined && (typeof command !== "string" || !command.trim())) {
+      throw new PixiuError(`config.project.commands.${name} must be a non-empty string`, { code: "CONFIG_INVALID" })
+    }
+  }
   if (!config.agents.default) throw new PixiuError("config.agents.default is required", { code: "CONFIG_INVALID" })
   if (!["local", "workspace"].includes(config.sandbox.mode)) {
     throw new PixiuError(`config.sandbox.mode has invalid value: ${String(config.sandbox.mode)}`, {

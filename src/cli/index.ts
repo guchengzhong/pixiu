@@ -29,6 +29,7 @@ import {
 } from "./commands"
 import { CliTraceRenderer } from "./trace"
 import { createTerminal, displayWidth, divider, oneLine, panel, panelWidthForTerminal, renderMarkdown, stripAnsi, table } from "./terminal"
+import { formatProjectInitResult, initializeProject } from "./init"
 import type { AgentEvent } from "../agent/events"
 import { approximateTokens, compactSessionMessages } from "../agent/compaction"
 import { collectSessionEvidence, type SessionEvidence } from "../session/evidence"
@@ -62,6 +63,7 @@ const HELP = `pixiu ${VERSION}
 Usage:
   pixiu --help
   pixiu --version
+  pixiu init
   pixiu doctor [--json]
   pixiu run [options] <message>
   pixiu -p [options] <message>
@@ -75,6 +77,9 @@ Agent commands:
   pixiu -p [--output-format text|json|stream-json] <message>
   pixiu chat [--permission-mode default|acceptEdits|bypassPermissions|plan]
   pixiu ui [--host <host>] [--port <port>] [--no-open]
+
+Project setup:
+  pixiu init                    Create pixiu.jsonc and detect verification commands.
 
 Inspect:
   pixiu tool list
@@ -2784,6 +2789,9 @@ export async function runCli(argv = process.argv.slice(2), options: CliOptions =
 
     const [command, ...args] = argv
     switch (command) {
+      case "init":
+        if (args.length) throw new PixiuError("init does not accept arguments", { code: "CLI_USAGE" })
+        return { exitCode: 0, output: formatProjectInitResult(await initializeProject()) }
       case "doctor":
         return await doctor(args)
       case "run":

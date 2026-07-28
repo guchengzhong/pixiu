@@ -4,11 +4,13 @@ import { dirname, join } from "node:path"
 import { createID } from "../shared/id"
 import { PixiuError } from "../shared/errors"
 import type { TodoItem } from "../todo/types"
-import type { CreateSessionInput, SessionMessage, SessionRecord, SessionStore, SessionTodoState } from "./types"
+import type { CreateSessionInput, SessionMessage, SessionRecord, SessionStore, SessionTodoState, SessionTurn } from "./types"
 
 type SessionLine =
   | { type: "session"; session: SessionRecord }
   | { type: "message"; message: SessionMessage }
+  | { type: "turn"; turn: SessionTurn }
+  | { type: "turn_update"; turnId: string; patch: Partial<SessionTurn> }
   | { type: "update"; patch: Partial<SessionRecord> }
   | { type: "todo_state"; state: SessionTodoState }
 
@@ -48,6 +50,7 @@ export class JsonlSessionStore implements SessionStore {
       createdAt: input.createdAt ?? new Date().toISOString(),
       parts: input.parts,
     }
+    if (input.turnId) message.turnId = input.turnId
     await this.appendLine(input.sessionId, { type: "message", message })
     await this.appendLine(input.sessionId, { type: "update", patch: { updatedAt: message.createdAt } })
     return message
@@ -60,6 +63,28 @@ export class JsonlSessionStore implements SessionStore {
 
   async readMessages(sessionId: string) {
     return (await this.readFile(sessionId)).messages
+  }
+
+  async createTurn(turn: SessionTurn) {
+    const session = await this.getSession(turn.sessionId)
+    if (!session) throw new PixiuError(`Unknown session: ${turn.sessionId}`, { code: "SESSION_NOT_FOUND" })
+    if ((await this.readTurns(turn.sessionId)).some((item) => item.id === turn.id)) {
+      throw new PixiuError(`Turn already exists: ${turn.id}`, { code: "TURN_EXISTS" })
+    }
+    await this.appendLine(turn.sessionId, { type: "turn", turn })
+    return turn
+  }
+
+  async updateTurn(sessionId: string, turnId: string, patch: Partial<SessionTurn>) {
+    const turn = (await this.readTurns(sessionId)).find((item) => item.id === turnId)
+    if (!turn) throw new PixiuError(`Unknown turn: ${turnId}`, { code: "TURN_NOT_FOUND" })
+    const next = { ...turn, ...patch, id: turn.id, sessionId: turn.sessionId, runId: turn.runId }
+    await this.appendLine(sessionId, { type: "turn_update", turnId, patch })
+    return next
+  }
+
+  async readTurns(sessionId: string) {
+    return (await this.readFile(sessionId)).turns
   }
 
   async getTodos(sessionId: string) {
@@ -102,12 +127,13 @@ export class JsonlSessionStore implements SessionStore {
     try {
       content = await readFile(path, "utf8")
     } catch (cause: any) {
-      if (cause?.code === "ENOENT") return { session: undefined, messages: [] as SessionMessage[], todoState: { todos: [] } as SessionTodoState }
+      if (cause?.code === "ENOENT") return { session: undefined, messages: [] as SessionMessage[], turns: [] as SessionTurn[], todoState: { todos: [] } as SessionTodoState }
       throw cause
     }
 
     let session: SessionRecord | undefined
     const messages: SessionMessage[] = []
+    const turns: SessionTurn[] = []
     let todoState: SessionTodoState = { todos: [] }
     const lines = content.split(/\r?\n/)
     for (let index = 0; index < lines.length; index += 1) {
@@ -124,10 +150,15 @@ export class JsonlSessionStore implements SessionStore {
       }
       if (line.type === "session") session = line.session
       if (line.type === "message") messages.push(line.message)
+      if (line.type === "turn") turns.push(line.turn)
+      if (line.type === "turn_update") {
+        const turnIndex = turns.findIndex((turn) => turn.id === line.turnId)
+        if (turnIndex >= 0) turns[turnIndex] = { ...turns[turnIndex]!, ...line.patch }
+      }
       if (line.type === "update" && session) session = { ...session, ...line.patch }
       if (line.type === "todo_state") todoState = cloneTodoState(line.state)
     }
-    return { session, messages, todoState }
+    return { session, messages, turns, todoState }
   }
 }
 

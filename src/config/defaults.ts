@@ -8,8 +8,17 @@ export type ProviderConfig = {
   model?: string
 }
 
+export type ProjectCommands = {
+  test?: string
+  typecheck?: string
+  build?: string
+}
+
 export type PixiuConfig = {
   model: string
+  project: {
+    commands: ProjectCommands
+  }
   providers: Record<string, ProviderConfig>
   agents: Record<
     string,
@@ -77,6 +86,9 @@ export type PixiuConfig = {
 // the default agent configuration, permission rules, skill paths, UI settings, and sandbox settings.
 export const defaultConfig = {
   model: "openai-compatible/example-model",
+  project: {
+    commands: {} as ProjectCommands,
+  },
   providers: {
     "openai-compatible": {
       type: "openai-compatible",

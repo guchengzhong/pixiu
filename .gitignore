@@ -12,6 +12,7 @@ docs/*api_key*.jsonl
 docs/updates/*/api_url.json
 *.local.json
 *.local.jsonc
+/pwd
 
 # Runtime state.
 .minicode/state/

@@ -2,7 +2,15 @@ import { describe, expect, test } from "bun:test"
 
 import { createUiApiClient, resolveUiToken } from "../../src/ui/client/api"
 import { groupActivityForDisplay, isPrimaryActivity } from "../../src/ui/client/activity"
-import { assistantTextFromRunResult, failureMessageFromAgentEvent, streamDisconnectMessage } from "../../src/ui/client/helpers"
+import {
+  assistantTextFromRunResult,
+  failureMessageFromAgentEvent,
+  isNearScrollEnd,
+  sessionMessages,
+  splitFileReferences,
+  staleRunMessage,
+  streamDisconnectMessage,
+} from "../../src/ui/client/helpers"
 import { redactUiText } from "../../src/ui/client/redact"
 import { deriveExecutionTimeline, summarizeShellCommand } from "../../src/ui/client/timeline"
 import { currentTodoIdFromTodos, normalizeTodos, todoMarker, todoProgress, todoUpdateMatchesSession } from "../../src/ui/client/todos"
@@ -44,10 +52,172 @@ describe("ui client", () => {
     expect(calls[0]?.init?.body).toBeInstanceOf(FormData)
   })
 
+  test("encodes workspace project and file paths", async () => {
+    const paths: string[] = []
+    const client = createUiApiClient("local-token", async (path) => {
+      paths.push(String(path))
+      return Response.json({ ok: true, data: {} })
+    })
+
+    await client.workspace("project one")
+    await client.previewWorkspaceFile("src/odd;name.ts", "project one")
+    await client.diffWorkspaceFile("src/odd;name.ts", "project one")
+
+    expect(paths).toEqual([
+      "/api/workspace?projectId=project+one",
+      "/api/workspace/content?projectId=project+one&path=src%2Fodd%3Bname.ts",
+      "/api/workspace/diff?projectId=project+one&path=src%2Fodd%3Bname.ts",
+    ])
+  })
+
+  test("sends revisioned change actions and turn-bound validation requests", async () => {
+    const calls: Array<{ path: string; init: RequestInit | undefined }> = []
+    const client = createUiApiClient("local-token", async (path, init) => {
+      calls.push({ path: String(path), init })
+      return Response.json({ ok: true, data: { operation: {}, changes: {}, record: {}, validations: [], currentRevision: "next" } })
+    })
+    const revision = "a".repeat(64)
+
+    await client.applySessionChanges("session one", {
+      revision,
+      selections: [{ path: "src/app.ts", hunkIds: ["b".repeat(64)] }],
+    })
+    await client.runSessionValidation("session one", {
+      turnId: "turn_1",
+      kind: "custom",
+      command: "make lint",
+      confirmed: true,
+    })
+
+    expect(calls.map((call) => call.path)).toEqual([
+      "/api/sessions/session%20one/changes/apply",
+      "/api/sessions/session%20one/validations",
+    ])
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
+      revision,
+      selections: [{ path: "src/app.ts", hunkIds: ["b".repeat(64)] }],
+    })
+    expect(JSON.parse(String(calls[1]?.init?.body))).toEqual({
+      turnId: "turn_1",
+      kind: "custom",
+      command: "make lint",
+      confirmed: true,
+    })
+  })
+
+  test("restores referenced files and groups persisted tool messages into the assistant turn", () => {
+    const messages = sessionMessages([
+      {
+        id: "system",
+        sessionId: "session",
+        role: "system",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        parts: [{ type: "text", text: "Do not render this system prompt." }],
+      },
+      {
+        id: "user",
+        sessionId: "session",
+        role: "user",
+        createdAt: "2026-01-01T00:00:01.000Z",
+        parts: [{ type: "text", text: "Review it\n\nReferenced files:\n- src/app.ts (workspace)" }],
+      },
+      {
+        id: "assistant",
+        sessionId: "session",
+        role: "assistant",
+        createdAt: "2026-01-01T00:00:02.000Z",
+        parts: [
+          { type: "text", text: "Done." },
+          { type: "tool_call", id: "call_read", name: "read", input: { path: "src/app.ts" } },
+        ],
+      },
+      {
+        id: "tool",
+        sessionId: "session",
+        role: "tool",
+        createdAt: "2026-01-01T00:00:03.000Z",
+        parts: [{ type: "tool_result", toolCallId: "call_read", name: "read", result: { ok: true, content: "source" } }],
+      },
+    ])
+
+    expect(messages).toHaveLength(2)
+    expect(messages[0]).toMatchObject({
+      role: "user",
+      text: "Review it",
+      attachments: [{ path: "src/app.ts", name: "app.ts", source: "workspace", status: "referenced" }],
+    })
+    expect(messages[1]).toMatchObject({
+      role: "assistant",
+      text: "Done.",
+      tools: [{ id: "call_read", name: "read", status: "success" }],
+    })
+    expect(JSON.stringify(messages)).not.toContain("system prompt")
+  })
+
+  test("leaves malformed file reference blocks as message text", () => {
+    expect(splitFileReferences("Keep this\n\nReferenced files:\n- src/app.ts (unknown)")).toEqual({
+      text: "Keep this\n\nReferenced files:\n- src/app.ts (unknown)",
+      attachments: [],
+    })
+  })
+
+  test("renders structured file and line references without exposing their content", () => {
+    const messages = sessionMessages([{
+      id: "user_range",
+      sessionId: "session",
+      turnId: "turn_range",
+      role: "user",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      parts: [
+        { type: "text", text: "Review this range" },
+        {
+          type: "file_reference",
+          path: "src/ui/client/styles.css",
+          source: "workspace",
+          startLine: 110,
+          endLine: 130,
+          content: ".secret-context { color: red; }",
+        },
+      ],
+    }])
+
+    expect(messages).toEqual([expect.objectContaining({
+      turnId: "turn_range",
+      text: "Review this range",
+      attachments: [expect.objectContaining({
+        path: "src/ui/client/styles.css",
+        startLine: 110,
+        endLine: 130,
+      })],
+    })])
+    expect(JSON.stringify(messages)).not.toContain("secret-context")
+    expect(splitFileReferences("Review\n\nReferenced files:\n- src/app.ts:4-9 (workspace)").attachments[0]).toMatchObject({
+      path: "src/app.ts",
+      startLine: 4,
+      endLine: 9,
+    })
+  })
+
+  test("only sticks to the message end within the configured scroll threshold", () => {
+    expect(isNearScrollEnd({ scrollHeight: 1_000, scrollTop: 510, clientHeight: 400 })).toBe(true)
+    expect(isNearScrollEnd({ scrollHeight: 1_000, scrollTop: 450, clientHeight: 400 })).toBe(false)
+  })
+
   test("throws API errors with the server message", async () => {
     const client = createUiApiClient("local-token", async () => Response.json({ ok: false, code: "NOPE", message: "broken" }, { status: 500 }))
 
     await expect(client.status()).rejects.toThrow("broken")
+  })
+
+  test("checks whether an interrupted run still exists", async () => {
+    const calls: string[] = []
+    const client = createUiApiClient("local-token", async (path) => {
+      calls.push(String(path))
+      return Response.json({ ok: true, data: { found: false } })
+    })
+
+    await expect(client.getRunStatus("run one")).resolves.toEqual({ found: false })
+    expect(calls).toEqual(["/api/runs/run%20one"])
   })
 
   test("normalizes and labels run status values", () => {
@@ -83,6 +253,8 @@ describe("ui client", () => {
     const generic = streamDisconnectMessage()
     expect(generic).not.toBe(toolFailure)
     expect(generic).toContain("Activity")
+    expect(staleRunMessage(toolFailure)).toBe("web_search failed: fetch failed: 503 Service Unavailable")
+    expect(staleRunMessage()).toContain("local Pixiu service restarted")
   })
 
   test("renders error run results from result.error or the last tool failure", () => {

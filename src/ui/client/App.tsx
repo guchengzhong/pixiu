@@ -15,9 +15,10 @@ import type {
   UiRunResult,
   UiSessionSummary,
   UiSkillSummary,
+  UiValidationRecord,
 } from "../shared/api"
 import { isActiveRunStatus, isTerminalRunStatus, normalizePersistedRunStatus, normalizeRunStatus, runStatusLabel, type RunStatus } from "../../run/status"
-import { createUiApiClient, resolveUiToken, type ProviderConfigPayload } from "./api"
+import { createUiApiClient, resolveUiToken, WORKSPACE_CHANGED_EVENT, type ProviderConfigPayload } from "./api"
 import { AppSidebar } from "./components/AppSidebar"
 import { ChatPane } from "./components/ChatPane"
 import { ConfigModal } from "./components/ConfigModal"
@@ -37,17 +38,23 @@ import {
   isPreviewUnsupported,
   presetForBaseURL,
   sessionMessages,
-  streamDisconnectMessage,
+  staleRunMessage,
   traceFromMessages,
 } from "./helpers"
 import { currentTodoIdFromTodos, normalizeTodos, todoUpdateMatchesSession } from "./todos"
-import type { ActivityItem, ChatMessage, FilePreview, FileReference, FileReferenceSource, InspectorTab, PermissionView, StatusSummary, TraceItem, WorkbenchPanel } from "./types"
+import type { ActivityItem, ChatMessage, FilePreview, FileReference, FileReferenceRange, FileReferenceSource, InspectorTab, PermissionView, StatusSummary, TraceItem, WorkbenchPanel } from "./types"
 import "./styles.css"
 
 declare global {
   interface Window {
     __PIXIU_UI_TOKEN__?: string
   }
+}
+
+const MODEL_OPTIONS = ["deepseek-ai/DeepSeek-V3.2", "Pro/moonshotai/Kimi-K2.6"]
+
+function nextMessageId(prefix: string) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2)}`
 }
 
 function App() {
@@ -77,12 +84,19 @@ function App() {
   const [uploadError, setUploadError] = useState<string>()
   const [evidence, setEvidence] = useState<SessionEvidence>()
   const [todos, setTodos] = useState<TodoItem[]>([])
+  const [validations, setValidations] = useState<UiValidationRecord[]>([])
   const [currentTodoId, setCurrentTodoId] = useState<string>()
   const [panelOpen, setPanelOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [inspectorCollapsed, setInspectorCollapsed] = useState(false)
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const [inspectorCollapsed, setInspectorCollapsed] = useState(true)
+  const [inspectorWidth, setInspectorWidth] = useState(() => {
+    const stored = Number.parseInt(window.localStorage.getItem("pixiu.inspectorWidth") ?? "", 10)
+    return Number.isFinite(stored) ? Math.min(620, Math.max(300, stored)) : 380
+  })
   const [activeTab, setActiveTab] = useState<InspectorTab>("activity")
   const [configOpen, setConfigOpen] = useState(false)
+  const [onboarding, setOnboarding] = useState(false)
   const [configNotice, setConfigNotice] = useState<{ text: string; kind?: "ok" | "error" }>({
     text: "Use env var mode to keep secrets out of pixiu.jsonc, or save a local key for quick setup. Responses redact secrets.",
   })
@@ -96,10 +110,13 @@ function App() {
   const [permission, setPermission] = useState<PermissionView>()
   const [status, setStatus] = useState<StatusSummary>()
   const [folderPicker, setFolderPicker] = useState<{ resolve(path?: string): void }>()
-  const messageEndRef = useRef<HTMLDivElement>(null)
+  const [modelChanging, setModelChanging] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sessionIdRef = useRef<string | undefined>(undefined)
-  const activeSourceRef = useRef<EventSource | undefined>(undefined)
+  const sessionSelectionGenerationRef = useRef(0)
+  const runIdBySessionRef = useRef(new Map<string, string>())
+  const runStatusBySessionRef = useRef(new Map<string, RunStatus>())
+  const permissionBySessionRef = useRef(new Map<string, PermissionView>())
   const statusSummary = useMemo(
     () => ({
       ...(status ?? {}),
@@ -108,6 +125,7 @@ function App() {
     }),
     [runStatus, status],
   )
+  const turns = useMemo(() => messages.flatMap((message) => message.turn ? [message.turn] : []), [messages])
 
   useEffect(() => {
     void refresh()
@@ -115,39 +133,44 @@ function App() {
   }, [])
 
   useEffect(() => {
-    messageEndRef.current?.scrollIntoView({ block: "end" })
-  }, [messages])
-
-  useEffect(() => {
     sessionIdRef.current = sessionId
   }, [sessionId])
 
+  useEffect(() => {
+    window.localStorage.setItem("pixiu.inspectorWidth", String(inspectorWidth))
+  }, [inspectorWidth])
+
   async function refresh() {
-    const nextStatus = await api.status()
-    setProvider(nextStatus.provider)
-    setStatus({
-      cwd: nextStatus.cwd,
-      workspace: nextStatus.workspace.workspaceDir,
-      sessionsPath: nextStatus.sessionsPath,
-      skills: nextStatus.skills.diagnostics,
-      mcp: nextStatus.mcp,
-      providerKeyPresent: nextStatus.provider.keyPresent,
-    })
-    setProviderForm((current) => ({
-      ...current,
-      baseURL: nextStatus.provider.baseURL ?? "",
-      model: nextStatus.provider.model ?? "",
-      credential: nextStatus.provider.credential === "apiKeyEnv" ? "apiKeyEnv" : "apiKey",
-      apiKeyEnv: nextStatus.provider.apiKeyEnv ?? "OPENAI_API_KEY",
-      apiKey: "",
-    }))
-    setEndpointPreset(presetForBaseURL(nextStatus.provider.baseURL))
-    if (!nextStatus.provider.keyPresent) {
-      setConfigNotice({ text: "Add an API key to start chatting." })
-      setConfigOpen(true)
+    try {
+      const nextStatus = await api.status()
+      setProvider(nextStatus.provider)
+      setStatus({
+        cwd: nextStatus.cwd,
+        workspace: nextStatus.workspace.workspaceDir,
+        sessionsPath: nextStatus.sessionsPath,
+        skills: nextStatus.skills.diagnostics,
+        mcp: nextStatus.mcp,
+        providerKeyPresent: nextStatus.provider.keyPresent,
+      })
+      setProviderForm((current) => ({
+        ...current,
+        baseURL: nextStatus.provider.baseURL ?? "",
+        model: nextStatus.provider.model ?? "",
+        credential: nextStatus.provider.credential === "apiKeyEnv" ? "apiKeyEnv" : "apiKey",
+        apiKeyEnv: nextStatus.provider.apiKeyEnv ?? "OPENAI_API_KEY",
+        apiKey: "",
+      }))
+      setEndpointPreset(presetForBaseURL(nextStatus.provider.baseURL))
+      if (!nextStatus.provider.keyPresent) {
+        setConfigNotice({ text: "Add an API key to start chatting." })
+        setOnboarding(true)
+        setConfigOpen(true)
+      }
+      await loadSessions()
+      await loadWorkbenchData()
+    } catch (error) {
+      setSessionsError(errorMessage(error))
     }
-    await loadSessions()
-    await loadWorkbenchData()
   }
 
   async function loadSessions() {
@@ -164,56 +187,88 @@ function App() {
   }
 
   async function loadWorkbenchData() {
+    const selectionGeneration = sessionSelectionGenerationRef.current
     const [projectData, skillData, mcpData] = await Promise.all([
       api.listProjects(),
       api.listSkills().catch(() => ({ skills: [] as UiSkillSummary[] })),
       api.listMcp().catch(() => ({ servers: [] as UiMcpServerSummary[] })),
     ])
     setProjects(projectData.projects)
-    setCurrentProjectId(projectData.currentProjectId)
+    if (sessionSelectionGenerationRef.current === selectionGeneration) {
+      setCurrentProjectId(projectData.currentProjectId)
+    }
     setSkills(skillData.skills)
     setMcpServers(mcpData.servers)
   }
 
   async function loadSession(id: string) {
-    const data = await api.getSession(id)
+    sessionSelectionGenerationRef.current += 1
+    sessionIdRef.current = id
+    setSessionId(id)
+    resetSessionView()
+    setChatTitle("Loading chat")
+    setRunId(runIdBySessionRef.current.get(id))
+    setRunStatus(runStatusBySessionRef.current.get(id) ?? "idle")
+    setPermission(permissionBySessionRef.current.get(id))
     setWorkbenchPanel("chat")
-    setSessionId(data.session.id)
-    sessionIdRef.current = data.session.id
-    if (data.session.projectId) setCurrentProjectId(data.session.projectId)
-    setChatTitle(data.session.title ?? "Chat")
-    setMessages(sessionMessages(data.messages))
-    setTrace(traceFromMessages(data.messages))
-    setActivity(data.activity)
-    setEvidence(data.evidence)
-    setFiles(data.files)
-    setTodoState(data.todos)
-    setRunStatus(normalizePersistedRunStatus(data.session.finishStatus))
-    setPreview(undefined)
-    setComposerReferences([])
-    setUploadError(undefined)
-    await loadSessions()
+    setMobileNavOpen(false)
+    try {
+      const data = await api.getSession(id)
+      if (sessionIdRef.current !== id) return
+      if (data.session.projectId) setCurrentProjectId(data.session.projectId)
+      setChatTitle(data.session.title ?? "Chat")
+      setMessages(sessionMessages(data.messages, data.evidence, data.turns))
+      setTrace(traceFromMessages(data.messages))
+      setActivity(data.activity)
+      setEvidence(data.evidence)
+      setFiles(data.files)
+      setTodoState(data.todos)
+      setValidations(data.validations)
+      setRunStatus(
+        runIdBySessionRef.current.has(id)
+          ? runStatusBySessionRef.current.get(id) ?? "running"
+          : normalizePersistedRunStatus(data.session.finishStatus),
+      )
+      setPreview(undefined)
+      setComposerReferences([])
+      setUploadError(undefined)
+      await loadSessions()
+    } catch (error) {
+      if (sessionIdRef.current === id) {
+        setChatTitle("Chat unavailable")
+        setSessionsError(errorMessage(error))
+      }
+    }
   }
 
   async function createSession(title = "New chat") {
+    const selectionGeneration = sessionSelectionGenerationRef.current
     const data = await api.createSession({ title, ...(currentProjectId ? { projectId: currentProjectId } : {}) })
-    setSessionId(data.session.id)
-    sessionIdRef.current = data.session.id
-    setChatTitle(data.session.title ?? "New chat")
-    setMessages([])
-    setTrace([])
-    setActivity([])
-    setEvidence(undefined)
-    setFiles(data.files)
-    setTodoState([])
-    setRunStatus("idle")
-    setPreview(undefined)
-    setComposerReferences([])
-    setUploadError(undefined)
+    const shouldSelect = sessionSelectionGenerationRef.current === selectionGeneration
+    if (shouldSelect) {
+      sessionSelectionGenerationRef.current += 1
+      setSessionId(data.session.id)
+      sessionIdRef.current = data.session.id
+      resetSessionView()
+      setChatTitle(data.session.title ?? "New chat")
+      setFiles(data.files)
+    }
     await loadSessions()
     await loadWorkbenchData()
-    setWorkbenchPanel("chat")
+    if (shouldSelect && sessionIdRef.current === data.session.id) {
+      setWorkbenchPanel("chat")
+      setMobileNavOpen(false)
+    }
     return data.session.id
+  }
+
+  function beginNewChat() {
+    sessionSelectionGenerationRef.current += 1
+    sessionIdRef.current = undefined
+    setSessionId(undefined)
+    resetSessionView()
+    setWorkbenchPanel("chat")
+    setMobileNavOpen(false)
   }
 
   async function createProject(input: { name: string; rootPath?: string }) {
@@ -253,11 +308,19 @@ function App() {
   }
 
   async function selectProject(projectId: string) {
+    const selectionGeneration = sessionSelectionGenerationRef.current + 1
+    sessionSelectionGenerationRef.current = selectionGeneration
     try {
       await api.selectProject(projectId)
+      if (sessionSelectionGenerationRef.current !== selectionGeneration) return
       setCurrentProjectId(projectId)
+      sessionIdRef.current = undefined
+      setSessionId(undefined)
+      resetSessionView()
       setWorkbenchPanel("projects")
+      setMobileNavOpen(false)
       await loadWorkbenchData()
+      await loadSessions()
     } catch (error) {
       setSessionsError(errorMessage(error))
     }
@@ -269,7 +332,7 @@ function App() {
     try {
       const data = await api.updateSession(id, { title })
       setSessions((current) => current.map((item) => item.id === id ? data.session : item))
-      if (sessionId === id) setChatTitle(data.session.title ?? title)
+      if (sessionIdRef.current === id) setChatTitle(data.session.title ?? title)
       await loadWorkbenchData()
     } catch (error) {
       setSessionsError(errorMessage(error))
@@ -290,17 +353,14 @@ function App() {
   async function removeSessionFromList(id: string) {
     try {
       await api.removeSessionFromList(id)
-      if (sessionId === id) {
-        setSessionId(undefined)
+      runIdBySessionRef.current.delete(id)
+      runStatusBySessionRef.current.delete(id)
+      permissionBySessionRef.current.delete(id)
+      if (sessionIdRef.current === id) {
+        sessionSelectionGenerationRef.current += 1
         sessionIdRef.current = undefined
-        setChatTitle("New chat")
-        setMessages([])
-        setTrace([])
-        setActivity([])
-        setEvidence(undefined)
-        setFiles([])
-        setTodoState([])
-        setRunStatus("idle")
+        setSessionId(undefined)
+        resetSessionView()
       }
       await loadSessions()
       await loadWorkbenchData()
@@ -310,7 +370,7 @@ function App() {
   }
 
   async function ensureSession(title?: string) {
-    if (sessionId) return sessionId
+    if (sessionIdRef.current) return sessionIdRef.current
     return await createSession(title)
   }
 
@@ -319,13 +379,15 @@ function App() {
       setFiles(seed)
       return
     }
-    if (!sessionId) return
-    const data = await api.listFiles(sessionId)
-    setFiles(data.files)
+    const selectedSessionId = sessionIdRef.current
+    if (!selectedSessionId) return
+    const data = await api.listFiles(selectedSessionId)
+    if (sessionIdRef.current === selectedSessionId) setFiles(data.files)
   }
 
   async function previewFile(path: string, file?: { kind?: UiFileSummary["kind"] }) {
-    if (!sessionId) return
+    const selectedSessionId = sessionIdRef.current
+    if (!selectedSessionId) return
     setActiveTab("files")
     setPanelOpen(true)
     if (isPreviewUnsupported(path, file?.kind)) {
@@ -337,9 +399,10 @@ function App() {
       return
     }
     try {
-      const data = await api.previewFile(sessionId, path)
-      setPreview({ path: data.path, content: data.content, status: "ready" })
+      const data = await api.previewFile(selectedSessionId, path)
+      if (sessionIdRef.current === selectedSessionId) setPreview({ path: data.path, content: data.content, status: "ready" })
     } catch (error) {
+      if (sessionIdRef.current !== selectedSessionId) return
       const message = errorMessage(error)
       const unsupported = message.includes("Only text files") || message.includes("too large")
       setPreview({
@@ -350,12 +413,33 @@ function App() {
     }
   }
 
+  function resetSessionView() {
+    setChatTitle("New chat")
+    setMessages([])
+    setTrace([])
+    setActivity([])
+    setEvidence(undefined)
+    setFiles([])
+    setTodoState([])
+    setValidations([])
+    setRunId(undefined)
+    setRunStatus("idle")
+    setPermission(undefined)
+    setPreview(undefined)
+    setComposerReferences([])
+    setUploadError(undefined)
+  }
+
   async function uploadFiles(fileList: FileList | null) {
     if (!fileList || fileList.length === 0) return
+    const selectionGeneration = sessionSelectionGenerationRef.current
     setUploadError(undefined)
+    let targetSessionId: string | undefined
     try {
       const id = await ensureSession("Uploaded files")
+      targetSessionId = id
       const data = await api.uploadFiles(id, fileList)
+      if (sessionIdRef.current !== id) return
       setFiles((current) => mergeFileSummaries(data.files, current))
       addFileReferences(
         data.files.map((file) => ({
@@ -371,6 +455,8 @@ function App() {
       setActiveTab("files")
       setPanelOpen(true)
     } catch (error) {
+      if (sessionSelectionGenerationRef.current !== selectionGeneration) return
+      if (targetSessionId && sessionIdRef.current !== targetSessionId) return
       const message = errorMessage(error)
       setUploadError(message)
       pushTrace({ title: "Upload failed", detail: message, failed: true })
@@ -378,140 +464,330 @@ function App() {
     }
   }
 
-  async function saveProvider(closeAfter: boolean) {
+  async function saveProvider(closeAfter: boolean, patch: Partial<ProviderConfigPayload> = {}) {
     setConfigNotice({ text: "Saving..." })
-    const baseURL = endpointPreset === "custom" ? providerForm.baseURL : ENDPOINTS[endpointPreset]
-    const saved = await api.saveProvider({ ...providerForm, baseURL })
-    setProvider(saved.provider)
-    setProviderForm((current) => ({ ...current, apiKey: "" }))
-    setConfigNotice({ text: "Provider saved.", kind: "ok" })
-    await refresh()
-    if (closeAfter) setConfigOpen(false)
+    try {
+      const baseURL = endpointPreset === "custom" ? providerForm.baseURL : ENDPOINTS[endpointPreset]
+      const saved = await api.saveProvider({ ...providerForm, ...patch, baseURL })
+      setProvider(saved.provider)
+      setProviderForm((current) => ({ ...current, ...patch, apiKey: "" }))
+      setConfigNotice({ text: "Provider saved.", kind: "ok" })
+      await refresh()
+      if (closeAfter) setConfigOpen(false)
+      return true
+    } catch (error) {
+      setConfigNotice({ text: errorMessage(error), kind: "error" })
+      return false
+    }
   }
 
   async function testProvider() {
     try {
-      await saveProvider(false)
+      if (!await saveProvider(false)) return
       setConfigNotice({ text: "Testing provider..." })
       const result = await api.testProvider()
       setConfigNotice({ text: `Provider test passed: ${result.text || result.model || "ok"}`, kind: "ok" })
+      if (onboarding) {
+        setOnboarding(false)
+        setConfigOpen(false)
+      }
     } catch (error) {
       setConfigNotice({ text: errorMessage(error), kind: "error" })
     }
   }
 
-  async function sendPrompt() {
-    const message = messageWithFileReferences(prompt.trim(), composerReferences)
-    if (!message || isActiveRunStatus(runStatus)) return
+  async function selectModel(model: string) {
+    if (!model || model === provider?.model || modelChanging) return
+    setModelChanging(true)
+    try {
+      await saveProvider(false, { model })
+    } finally {
+      setModelChanging(false)
+    }
+  }
+
+  async function sendPrompt(override?: { message: string }) {
+    const selectionGeneration = sessionSelectionGenerationRef.current
+    const promptText = (override?.message ?? prompt).trim()
+    const references = override ? [] : [...composerReferences]
+    const message = promptText
+    const trackedSessionRun = sessionIdRef.current ? runIdBySessionRef.current.get(sessionIdRef.current) : undefined
+    if (!message || runId || trackedSessionRun || isActiveRunStatus(runStatus)) return
     if (provider && !provider.keyPresent) {
       setConfigNotice({ text: "Add an API key before sending." })
       setConfigOpen(true)
       return
     }
+    let targetSessionId: string | undefined
+    let targetRunId: string | undefined
     try {
-      const id = sessionId ?? await createSession(message.slice(0, 60) || "New chat")
-      setPrompt("")
-      setComposerReferences([])
-      setUploadError(undefined)
-      setMessages((current) => [...current, { role: "user", text: message }, { role: "assistant", text: "Thinking...", pending: true }])
-      setRunStatus("queued")
-      const started = await api.startRun({ message, sessionId: id, permissionMode })
+      const id = sessionId ?? await createSession(message.slice(0, 60) || references[0]?.path || "New chat")
+      targetSessionId = id
+      const turnId = nextMessageId("turn")
+      if (sessionIdRef.current === id) {
+        setPrompt("")
+        setComposerReferences([])
+        setUploadError(undefined)
+        setMessages((current) => [
+          ...current,
+          {
+            id: `${turnId}_user`,
+            role: "user",
+            text: promptText,
+            ...(references.length ? { attachments: references } : {}),
+          },
+          { id: `${turnId}_assistant`, role: "assistant", text: "", pending: true, tools: [], artifacts: [] },
+        ])
+        setRunStatus("queued")
+      }
+      const started = await api.startRun({
+        message,
+        sessionId: id,
+        permissionMode,
+        references: references.map(({ path, source, startLine, endLine }) => ({
+          path,
+          source,
+          ...(startLine !== undefined ? { startLine } : {}),
+          ...(endLine !== undefined ? { endLine } : {}),
+        })),
+      })
+      targetRunId = started.runId
+      const startedStatus = normalizeRunStatus(started.status) ?? "queued"
+      runIdBySessionRef.current.set(id, started.runId)
+      runStatusBySessionRef.current.set(id, startedStatus)
+      if (sessionIdRef.current !== id) {
+        void subscribeRun(started.runId, id).catch(() => undefined)
+        return
+      }
       setRunId(started.runId)
-      setRunStatus(normalizeRunStatus(started.status) ?? "queued")
-      await subscribeRun(started.runId)
+      setRunStatus(startedStatus)
+      await subscribeRun(started.runId, id)
     } catch (error) {
-      replacePending(`Error: ${errorMessage(error)}`)
-      pushTrace({ title: "Error", detail: errorMessage(error), failed: true })
-      setRunStatus("error")
-      setPanelOpen(true)
+      if (!targetSessionId && sessionSelectionGenerationRef.current !== selectionGeneration) return
+      const trackedRunId = targetSessionId ? runIdBySessionRef.current.get(targetSessionId) : undefined
+      const newerRunOwnsSession = Boolean(targetRunId && trackedRunId && trackedRunId !== targetRunId)
+      if (!newerRunOwnsSession && (!targetSessionId || sessionIdRef.current === targetSessionId)) {
+        replacePending(`Error: ${errorMessage(error)}`, targetSessionId)
+        pushTrace({ title: "Error", detail: errorMessage(error), failed: true }, targetSessionId)
+        setRunStatus("error")
+        setPanelOpen(true)
+      }
     } finally {
-      setRunId(undefined)
-      setRunStatus((current) => isActiveRunStatus(current) ? "idle" : current)
+      if (!targetSessionId && sessionSelectionGenerationRef.current !== selectionGeneration) return
+      const trackedRunId = targetSessionId ? runIdBySessionRef.current.get(targetSessionId) : undefined
+      const newerRunOwnsSession = Boolean(targetRunId && trackedRunId && trackedRunId !== targetRunId)
+      if (!newerRunOwnsSession && (!targetSessionId || sessionIdRef.current === targetSessionId)) {
+        setRunId(undefined)
+        setRunStatus((current) => isActiveRunStatus(current) ? "idle" : current)
+      }
     }
   }
 
-  function subscribeRun(id: string) {
-    return new Promise<void>((resolve, reject) => {
-      // Only one run stream may be active at a time. Close any prior stream so a stale
-      // run's events can't leak into the current bubble.
-      try {
-        activeSourceRef.current?.close()
-      } catch {
-        // already closed
+  function editMessage(message: ChatMessage) {
+    setWorkbenchPanel("chat")
+    setPrompt(message.text)
+    setComposerReferences(message.attachments ?? [])
+  }
+
+  async function retryTurn(turnId: string, anotherModel: boolean) {
+    const targetSessionId = sessionIdRef.current
+    const trackedSessionRun = targetSessionId ? runIdBySessionRef.current.get(targetSessionId) : undefined
+    if (!targetSessionId || runId || trackedSessionRun || isActiveRunStatus(runStatus)) return
+    const assistantIndex = messages.findIndex((message) => message.role === "assistant" && message.turn?.id === turnId)
+    if (assistantIndex < 0) return
+    let userMessage: ChatMessage | undefined
+    for (let index = assistantIndex - 1; index >= 0; index -= 1) {
+      if (messages[index]?.role === "user") {
+        userMessage = messages[index]
+        break
       }
+    }
+    if (!userMessage) return
+    const currentModel = messages[assistantIndex]?.turn?.model ?? provider?.model
+    const model = anotherModel
+      ? MODEL_OPTIONS.find((candidate) => candidate !== currentModel) ?? currentModel
+      : currentModel
+    const references = userMessage.attachments ?? []
+    const optimisticId = nextMessageId("retry")
+    let targetRunId: string | undefined
+    setMessages((current) => [
+      ...current,
+      { ...userMessage, id: `${optimisticId}_user`, turnId: undefined },
+      { id: `${optimisticId}_assistant`, role: "assistant", text: "", pending: true, tools: [], artifacts: [] },
+    ])
+    setRunStatus("queued")
+    try {
+      const started = await api.startRun({
+        message: userMessage.text,
+        sessionId: targetSessionId,
+        permissionMode,
+        ...(model ? { model } : {}),
+        retryOf: turnId,
+        references: references.map(({ path, source, startLine, endLine }) => ({
+          path,
+          source,
+          ...(startLine !== undefined ? { startLine } : {}),
+          ...(endLine !== undefined ? { endLine } : {}),
+        })),
+      })
+      targetRunId = started.runId
+      const startedStatus = normalizeRunStatus(started.status) ?? "queued"
+      runIdBySessionRef.current.set(targetSessionId, started.runId)
+      runStatusBySessionRef.current.set(targetSessionId, startedStatus)
+      if (sessionIdRef.current !== targetSessionId) {
+        void subscribeRun(started.runId, targetSessionId).catch(() => undefined)
+        return
+      }
+      setRunId(started.runId)
+      setRunStatus(startedStatus)
+      await subscribeRun(started.runId, targetSessionId)
+    } catch (error) {
+      const tracked = runIdBySessionRef.current.get(targetSessionId)
+      if (!targetRunId || !tracked || tracked === targetRunId) {
+        replacePending(`Error: ${errorMessage(error)}`, targetSessionId)
+        setRunStatus("error")
+      }
+    } finally {
+      const tracked = runIdBySessionRef.current.get(targetSessionId)
+      if ((!targetRunId || !tracked || tracked === targetRunId) && sessionIdRef.current === targetSessionId) {
+        setRunId(undefined)
+        setRunStatus((current) => isActiveRunStatus(current) ? "idle" : current)
+      }
+    }
+  }
+
+  async function rollbackTurn(turnId: string) {
+    const targetSessionId = sessionIdRef.current
+    if (!targetSessionId || runIdBySessionRef.current.has(targetSessionId) || isActiveRunStatus(runStatus)) return
+    if (!window.confirm("Restore the session files to their state before this turn? The real project is not changed.")) return
+    try {
+      await api.rollbackTurn(targetSessionId, turnId)
+      window.dispatchEvent(new Event(WORKSPACE_CHANGED_EVENT))
+      await loadSession(targetSessionId)
+      pushTrace({ title: "Workspace restored", detail: `Restored files to the checkpoint before ${turnId}.` }, targetSessionId)
+    } catch (error) {
+      pushTrace({ title: "Restore failed", detail: errorMessage(error), failed: true }, targetSessionId)
+      setPanelOpen(true)
+    }
+  }
+
+  async function fixValidation(record: UiValidationRecord) {
+    const output = record.output.trim() || `Command exited with code ${record.exitCode}.`
+    setWorkbenchPanel("chat")
+    setPanelOpen(false)
+    setInspectorCollapsed(true)
+    await sendPrompt({
+      message: [
+        `Fix the ${record.kind} validation failure from turn ${record.turnId}.`,
+        `Command: ${record.command}`,
+        `Exit code: ${record.exitCode}`,
+        "Output:",
+        output,
+        "Inspect the current session changes, make the smallest correct fix, and rerun the relevant validation.",
+      ].join("\n"),
+    })
+  }
+
+  function subscribeRun(id: string, targetSessionId: string) {
+    return new Promise<void>((resolve) => {
       const source = api.eventSource(id)
-      activeSourceRef.current = source
-      const MAX_RECONNECTS = 5
       let settled = false
-      let opened = false
-      let reconnects = 0
       let lastFailure: string | undefined
+      let reconnecting = false
+      const selected = () => sessionIdRef.current === targetSessionId
+      const ownsRun = () => runIdBySessionRef.current.get(targetSessionId) === id
       source.onopen = () => {
-        if (opened) {
-          // Reconnected after a transient drop. The server replays buffered events, so
-          // reset the pending assistant bubble to let replayed deltas rebuild it cleanly.
-          reconnects = 0
-          replacePending("")
-        }
-        opened = true
+        if (!reconnecting) return
+        reconnecting = false
+        pushTrace({ title: "Run stream restored", detail: "Resumed from the last received event." }, targetSessionId)
       }
       source.addEventListener("run_status", (event) => {
+        if (!ownsRun()) return
         const data = JSON.parse(event.data) as RunStatusEvent
+        runStatusBySessionRef.current.set(targetSessionId, data.status)
+        if (isTerminalRunStatus(data.status)) {
+          permissionBySessionRef.current.delete(targetSessionId)
+        }
+        if (!selected()) return
         setRunStatus(data.status)
-        if (isTerminalRunStatus(data.status)) setPermission(undefined)
-        if (data.sessionId) {
-          setSessionId(data.sessionId)
-          sessionIdRef.current = data.sessionId
+        if (isTerminalRunStatus(data.status)) {
+          setPermission(undefined)
         }
       })
       source.addEventListener("run", (event) => {
+        if (!ownsRun()) return
         const data = JSON.parse(event.data) as { status?: unknown; runStatus?: unknown }
         const status = normalizeRunStatus(data.runStatus) ?? normalizeRunStatus(data.status)
-        if (status) setRunStatus(status)
+        if (status) runStatusBySessionRef.current.set(targetSessionId, status)
+        if (status && selected()) setRunStatus(status)
       })
       source.addEventListener("activity_updated", (event) => {
+        if (!ownsRun() || !selected()) return
         const data = JSON.parse(event.data) as ActivityUpdatedEvent
         setActivity((current) => mergeActivityItems(current, data.activity))
-        setActiveTab("activity")
-        setPanelOpen(true)
       })
       source.addEventListener("agent_event", (event) => {
+        if (!ownsRun()) return
         const agentEvent = JSON.parse(event.data) as AgentEvent
         const failure = failureMessageFromAgentEvent(agentEvent)
         if (failure) lastFailure = failure
-        applyAgentEvent(agentEvent)
+        applyAgentEvent(agentEvent, targetSessionId)
       })
       source.addEventListener("permission_request", (event) => {
-        setPermission(JSON.parse(event.data) as PermissionView)
+        if (!ownsRun()) return
+        const next = { ...(JSON.parse(event.data) as PermissionView), sessionId: targetSessionId }
+        permissionBySessionRef.current.set(targetSessionId, next)
+        if (selected()) setPermission(next)
       })
       source.addEventListener("permission_result", (event) => {
-        pushTrace({ title: "permission", detail: JSON.stringify(JSON.parse(event.data), null, 2), kind: "permission" })
+        if (!ownsRun()) return
+        const data = JSON.parse(event.data) as { id?: string }
+        const current = permissionBySessionRef.current.get(targetSessionId)
+        if (data.id && current?.id === data.id) permissionBySessionRef.current.delete(targetSessionId)
+        if (selected() && data.id) {
+          setPermission((value) => value?.id === data.id ? undefined : value)
+        }
+        pushTrace({ title: "permission", detail: JSON.stringify(data, null, 2), kind: "permission" }, targetSessionId)
       })
       source.addEventListener("result", (event) => {
         const result = JSON.parse(event.data) as UiRunResult
         settled = true
         source.close()
-        setRunStatus(normalizeRunStatus(result.status) ?? "idle")
-        setPermission(undefined)
-        if (result.sessionId) {
-          setSessionId(result.sessionId)
-          sessionIdRef.current = result.sessionId
+        const wasCurrentRun = ownsRun()
+        if (wasCurrentRun) {
+          runIdBySessionRef.current.delete(targetSessionId)
+          runStatusBySessionRef.current.delete(targetSessionId)
+          permissionBySessionRef.current.delete(targetSessionId)
+        }
+        if (wasCurrentRun && selected()) {
+          setRunId(undefined)
+          setRunStatus(normalizeRunStatus(result.status) ?? "idle")
+          setPermission(undefined)
+          replacePending(assistantTextFromRunResult(result, lastFailure), targetSessionId)
+        }
+        if (wasCurrentRun && result.sessionId) {
           void api.getSession(result.sessionId).then((detail) => {
+            if (!selected() || runIdBySessionRef.current.has(targetSessionId)) return
             setChatTitle(detail.session.title ?? "Chat")
             if (detail.session.projectId) setCurrentProjectId(detail.session.projectId)
             setEvidence(detail.evidence)
             setFiles(detail.files)
             setTodoState(detail.todos)
             setActivity(detail.activity)
+            setTrace(traceFromMessages(detail.messages))
+            setMessages(sessionMessages(detail.messages, detail.evidence, detail.turns))
+            setValidations(detail.validations)
           })
         }
-        replacePending(assistantTextFromRunResult(result, lastFailure))
-        pushTrace({
-          title: "Run finished",
-          detail: `status: ${result.status}\nfinishReason: ${result.finishReason ?? "unknown"}\nsessionId: ${result.sessionId ?? "new"}`,
-          failed: result.status === "error" || result.status === "cancelled",
-        })
+        if (wasCurrentRun) {
+          pushTrace({
+            title: "Run finished",
+            detail: `status: ${result.status}\nfinishReason: ${result.finishReason ?? "unknown"}\nsessionId: ${result.sessionId ?? "new"}`,
+            failed: result.status === "error" || result.status === "cancelled",
+          }, targetSessionId)
+        }
         void loadSessions()
+        window.dispatchEvent(new Event(WORKSPACE_CHANGED_EVENT))
         resolve()
       })
       source.onerror = (event) => {
@@ -520,47 +796,81 @@ function App() {
           lastFailure = failure
           return
         }
-        if (settled) {
-          source.close()
-          return
+        if (settled) return
+        if (!reconnecting) {
+          reconnecting = true
+          pushTrace({ title: "Run stream interrupted", detail: "Reconnecting from the last received event..." }, targetSessionId)
         }
-        // Connection-level drop. The run keeps executing on the server and buffers its
-        // events, so let EventSource auto-reconnect (it will replay, including the final
-        // result). Only give up after repeated failures with no successful reconnect.
-        reconnects += 1
-        if (reconnects > MAX_RECONNECTS) {
+        void api.getRunStatus(id).then((snapshot) => {
+          if (snapshot.found || settled || !ownsRun()) return
+          settled = true
           source.close()
-          reject(new Error(streamDisconnectMessage(lastFailure)))
-        }
+          runIdBySessionRef.current.delete(targetSessionId)
+          runStatusBySessionRef.current.delete(targetSessionId)
+          permissionBySessionRef.current.delete(targetSessionId)
+          if (selected()) {
+            setRunId(undefined)
+            setRunStatus("idle")
+            setPermission(undefined)
+            replacePending(staleRunMessage(lastFailure), targetSessionId)
+          }
+          pushTrace({
+            title: "Run stopped",
+            detail: "The local Pixiu service restarted and no longer has this run.",
+            failed: true,
+          }, targetSessionId)
+          resolve()
+        }).catch(() => undefined)
       }
     })
   }
 
-  function applyAgentEvent(event: AgentEvent) {
+  function applyAgentEvent(event: AgentEvent, targetSessionId: string) {
+    if (sessionIdRef.current !== targetSessionId) return
     if (event.type === "session_created") {
-      setSessionId(event.sessionId)
-      sessionIdRef.current = event.sessionId
       setChatTitle("Working chat")
       void loadSessions()
     }
-    if (todoUpdateMatchesSession(event, sessionIdRef.current)) {
+    if (todoUpdateMatchesSession(event, targetSessionId)) {
       setTodos(event.todos)
       setCurrentTodoId(event.currentTodoId ?? currentTodoIdFromTodos(event.todos))
     }
-    if (event.type === "llm_text_delta") appendAssistantDelta(event.text)
-    if (event.type === "message") replacePending(event.content)
-    if (event.type === "assistant_progress_delta") pushTrace({ title: "progress", detail: event.text, kind: "thinking" })
+    if (event.type === "llm_text_delta") appendAssistantDelta(event.text, targetSessionId)
+    if (event.type === "message") replacePending(event.content, targetSessionId)
+    if (event.type === "assistant_progress_delta") pushTrace({ title: "progress", detail: event.text, kind: "thinking" }, targetSessionId)
     if (event.type === "tool_call") {
-      pushTrace({ title: `tool ${event.name}`, detail: JSON.stringify(event.input, null, 2), kind: "call" })
-      setActiveTab("activity")
-      setPanelOpen(true)
+      pushTrace({ title: `tool ${event.name}`, detail: JSON.stringify(event.input, null, 2), kind: "call" }, targetSessionId)
+      updateAssistantTurn((message) => ({
+        ...message,
+        tools: [
+          ...(message.tools ?? []).filter((tool) => tool.id !== event.id),
+          { id: event.id, name: event.name, status: "running", detail: JSON.stringify(event.input, null, 2) },
+        ],
+      }), targetSessionId)
     }
-    if (event.type === "tool_result") pushTrace({ title: `${event.ok ? "ok" : "failed"} ${event.name}`, detail: event.content, kind: "result", failed: !event.ok })
-    if (event.type === "error") pushTrace({ title: "agent error", detail: event.message, failed: true })
-    if (event.type === "finish") {
-      setSessionId(event.sessionId)
-      sessionIdRef.current = event.sessionId
+    if (event.type === "tool_result") {
+      pushTrace({ title: `${event.ok ? "ok" : "failed"} ${event.name}`, detail: event.content, kind: "result", failed: !event.ok }, targetSessionId)
+      updateAssistantTurn((message) => {
+        const tools = [...(message.tools ?? [])]
+        const index = tools.findIndex((tool) => tool.id === event.id)
+        const tool = { id: event.id, name: event.name, status: event.ok ? "success" as const : "failed" as const, detail: event.content }
+        if (index >= 0) tools[index] = tool
+        else tools.push(tool)
+        const metadata = event.metadata && typeof event.metadata === "object" && !Array.isArray(event.metadata) ? event.metadata : undefined
+        const path = metadata && typeof metadata.path === "string" ? metadata.path : undefined
+        const artifact = path && ["write", "edit", "patch"].includes(event.name)
+          ? { kind: "artifact" as const, tool: event.name, label: path, path }
+          : undefined
+        return {
+          ...message,
+          tools,
+          artifacts: artifact
+            ? [...(message.artifacts ?? []).filter((item) => item.path !== path), artifact]
+            : message.artifacts,
+        }
+      }, targetSessionId)
     }
+    if (event.type === "error") pushTrace({ title: "agent error", detail: event.message, failed: true }, targetSessionId)
   }
 
   function setTodoState(nextTodos: TodoItem[] | undefined) {
@@ -569,41 +879,77 @@ function App() {
     setCurrentTodoId(currentTodoIdFromTodos(normalized))
   }
 
-  function appendAssistantDelta(text: string) {
+  function appendAssistantDelta(text: string, targetSessionId: string) {
+    updateAssistantTurn((last) => ({ ...last, text: last.pending ? text : `${last.text}${text}`, pending: false }), targetSessionId)
+  }
+
+  function replacePending(text: string, targetSessionId?: string) {
+    if (targetSessionId && sessionIdRef.current !== targetSessionId) return
     setMessages((current) => {
       const next = [...current]
       const last = next[next.length - 1]
-      if (!last || last.role !== "assistant") return [...next, { role: "assistant", text }]
-      next[next.length - 1] = { role: "assistant", text: last.pending ? text : `${last.text}${text}` }
+      if (!last || last.role !== "assistant") return [...next, { id: nextMessageId("assistant"), role: "assistant", text }]
+      next[next.length - 1] = { ...last, text, pending: false }
       return next
     })
   }
 
-  function replacePending(text: string) {
+  function updateAssistantTurn(update: (message: ChatMessage) => ChatMessage, targetSessionId: string) {
+    if (sessionIdRef.current !== targetSessionId) return
     setMessages((current) => {
       const next = [...current]
-      const last = next[next.length - 1]
-      if (!last || last.role !== "assistant") return [...next, { role: "assistant", text }]
-      next[next.length - 1] = { role: "assistant", text }
+      const index = next.findLastIndex((message) => message.role === "assistant")
+      if (index < 0) return [...next, update({ id: nextMessageId("assistant"), role: "assistant", text: "", pending: true })]
+      next[index] = update(next[index])
       return next
     })
   }
 
-  function pushTrace(item: Omit<TraceItem, "id">) {
+  function pushTrace(item: Omit<TraceItem, "id">, targetSessionId?: string) {
+    if (targetSessionId && sessionIdRef.current !== targetSessionId) return
     setTrace((current) => [{ id: `${Date.now()}_${Math.random().toString(36).slice(2)}`, ...item }, ...current].slice(0, 80))
   }
 
   async function answerPermission(action: "allow" | "deny", scope: "once" | "sessionSimilar") {
-    if (!permission) return
-    const id = permission.id
-    setPermission(undefined)
-    await api.answerPermission(id, { action, scope })
+    if (!permission || permission.submitting) return
+    const current = permission
+    const submitting = { ...current, submitting: true, error: undefined }
+    if (current.sessionId && permissionBySessionRef.current.get(current.sessionId)?.id === current.id) {
+      permissionBySessionRef.current.set(current.sessionId, submitting)
+    }
+    setPermission((value) => value?.id === current.id ? submitting : value)
+    try {
+      await api.answerPermission(current.id, { action, scope })
+      if (current.sessionId && permissionBySessionRef.current.get(current.sessionId)?.id === current.id) {
+        permissionBySessionRef.current.delete(current.sessionId)
+      }
+      if (!current.sessionId || sessionIdRef.current === current.sessionId) {
+        setPermission((value) => value?.id === current.id ? undefined : value)
+      }
+    } catch (error) {
+      const recovered = { ...current, submitting: false, error: errorMessage(error) }
+      const stillTracked = !current.sessionId || permissionBySessionRef.current.get(current.sessionId)?.id === current.id
+      if (current.sessionId && stillTracked) permissionBySessionRef.current.set(current.sessionId, recovered)
+      if (stillTracked && (!current.sessionId || sessionIdRef.current === current.sessionId)) {
+        setPermission((value) => value?.id === current.id ? recovered : value)
+      }
+    }
   }
 
   async function cancelRun() {
-    if (!runId) return
-    await api.cancelRun(runId)
-    setRunStatus("cancelled")
+    const targetRunId = runId
+    const targetSessionId = sessionIdRef.current
+    if (!targetRunId || !targetSessionId) return
+    try {
+      await api.cancelRun(targetRunId)
+      if (runIdBySessionRef.current.get(targetSessionId) !== targetRunId) return
+      runStatusBySessionRef.current.set(targetSessionId, "cancelled")
+      if (sessionIdRef.current === targetSessionId) setRunStatus("cancelled")
+    } catch (error) {
+      if (runIdBySessionRef.current.get(targetSessionId) !== targetRunId || sessionIdRef.current !== targetSessionId) return
+      pushTrace({ title: "Cancel failed", detail: errorMessage(error), failed: true }, targetSessionId)
+      setPanelOpen(true)
+    }
   }
 
   const providerReady = provider?.keyPresent === true
@@ -618,7 +964,7 @@ function App() {
     setComposerReferences((current) => {
       const next = [...current]
       for (const reference of nextReferences) {
-        const index = next.findIndex((item) => item.path === reference.path && item.source === reference.source)
+        const index = next.findIndex((item) => fileReferenceKey(item) === fileReferenceKey(reference))
         if (index >= 0) {
           next[index] = { ...next[index], ...reference }
         } else {
@@ -629,7 +975,7 @@ function App() {
     })
   }
 
-  function referenceFile(file: UiFileSummary, source: FileReferenceSource = "workspace") {
+  function referenceFile(file: UiFileSummary, source: FileReferenceSource = "workspace", range: FileReferenceRange = {}) {
     addFileReferences([
       {
         path: file.path,
@@ -638,19 +984,17 @@ function App() {
         status: "referenced",
         size: file.size,
         kind: file.kind,
+        ...range,
       },
     ])
   }
 
   function removeComposerReference(reference: FileReference) {
-    setComposerReferences((current) => current.filter((item) => !(item.path === reference.path && item.source === reference.source)))
+    setComposerReferences((current) => current.filter((item) => fileReferenceKey(item) !== fileReferenceKey(reference)))
   }
 
-  function messageWithFileReferences(message: string, references: FileReference[]) {
-    if (!references.length) return message
-    const lines = references.map((reference) => `- ${reference.path} (${reference.source})`)
-    const block = `Referenced files:\n${lines.join("\n")}`
-    return message ? `${message}\n\n${block}` : block
+  function fileReferenceKey(reference: FileReference) {
+    return `${reference.source}:${reference.path}:${reference.startLine ?? ""}:${reference.endLine ?? ""}`
   }
 
   function mergeFileSummaries(primary: UiFileSummary[], secondary: UiFileSummary[]) {
@@ -680,6 +1024,9 @@ function App() {
     <WorkbenchLayout
       sidebarCollapsed={sidebarCollapsed}
       inspectorCollapsed={inspectorCollapsed}
+      mobileNavOpen={mobileNavOpen}
+      inspectorWidth={inspectorWidth}
+      onCloseMobileNav={() => setMobileNavOpen(false)}
       sidebar={
         <AppSidebar
           sessions={sessions}
@@ -694,8 +1041,10 @@ function App() {
           sessionsLoading={sessionsLoading}
           sessionsError={sessionsError}
           collapsed={sidebarCollapsed}
+          mobileOpen={mobileNavOpen}
           onToggleCollapsed={() => setSidebarCollapsed((collapsed) => !collapsed)}
-          onNewChat={() => void createSession("New chat")}
+          onCloseMobileNav={() => setMobileNavOpen(false)}
+          onNewChat={beginNewChat}
           onOpenPanel={setWorkbenchPanel}
           onSelectProject={(id) => void selectProject(id)}
           onCreateProject={(input) => void createProject(input)}
@@ -714,13 +1063,14 @@ function App() {
           chatTitle={chatTitle}
           cwd={projects.find((project) => project.id === currentProjectId)?.rootPath ?? statusSummary.cwd}
           model={provider?.model}
-          permissionMode={permissionMode}
+          models={MODEL_OPTIONS}
+          modelChanging={modelChanging}
           runStatus={runStatus}
           runStatusLabel={runStatusLabel(runStatus)}
-          providerReady={providerReady}
-          todos={todos}
-          currentTodoId={currentTodoId}
+          navigationOpen={mobileNavOpen}
           inspectorOpen={panelOpen && !inspectorCollapsed}
+          onOpenNavigation={() => setMobileNavOpen(true)}
+          onModelChange={(model) => void selectModel(model)}
           onToggleInspector={() => {
             if (panelOpen && !inspectorCollapsed) {
               setPanelOpen(false)
@@ -734,7 +1084,8 @@ function App() {
       configModal={
         <ConfigModal
           open={configOpen}
-          close={() => setConfigOpen(false)}
+          onboarding={onboarding}
+          close={() => { if (!onboarding) setConfigOpen(false) }}
           notice={configNotice}
           form={providerForm}
           setForm={setProviderForm}
@@ -742,6 +1093,9 @@ function App() {
           setEndpointPreset={setEndpointPreset}
           save={() => void saveProvider(true)}
           test={() => void testProvider()}
+          projects={projects}
+          currentProjectId={currentProjectId}
+          selectProject={(projectId) => void selectProject(projectId)}
         />
       }
       permissionModal={
@@ -760,7 +1114,6 @@ function App() {
       {workbenchPanel === "chat" ? (
         <ChatPane
           messages={messages}
-          messageEndRef={messageEndRef}
           setPrompt={setPrompt}
           prompt={prompt}
           sendPrompt={sendPrompt}
@@ -777,25 +1130,27 @@ function App() {
           removeComposerReference={removeComposerReference}
           previewReference={(reference) => void previewFile(reference.path, reference)}
           files={files}
-          trace={trace}
-          activity={activity}
-          evidence={evidence}
-          todos={todos}
-          currentTodoId={currentTodoId}
-          openInspector={openInspector}
           previewFile={(file) => void previewFile(file.path, file)}
+          editMessage={editMessage}
+          retryTurn={retryTurn}
+          rollbackTurn={rollbackTurn}
+          validations={validations}
+          fixValidation={(record) => void fixValidation(record)}
         />
       ) : (
         <WorkbenchPanelView
           panel={workbenchPanel}
           projects={projects}
           currentProjectId={currentProjectId}
+          sessionId={sessionId}
           sessions={sessions}
           skills={skills}
           mcpServers={mcpServers}
           files={files}
           preview={preview}
           evidence={evidence}
+          turns={turns}
+          validations={validations}
           status={statusSummary}
           providerReady={providerReady}
           onCreateProject={(input) => void createProject(input)}
@@ -803,13 +1158,15 @@ function App() {
           onRemoveProjectEntry={(id) => void removeProjectEntry(id)}
           onSelectProject={(id) => void selectProject(id)}
           onBrowseFolder={browseFolder}
-          onCreateSession={() => void createSession("New chat")}
+          onCreateSession={beginNewChat}
           onLoadSession={(id) => void loadSession(id)}
           onRenameSession={(id, title) => void renameSession(id, title)}
           onRemoveSessionFromList={(id) => void removeSessionFromList(id)}
           onMoveSession={(id, projectId) => void moveSession(id, projectId)}
           onPreviewFile={(file) => void previewFile(file.path, file)}
           onReferenceFile={referenceFile}
+          onValidationsChange={setValidations}
+          onFixValidation={(record) => void fixValidation(record)}
           onConfigureApi={() => setConfigOpen(true)}
           onRefresh={() => { void loadWorkbenchData(); void loadSessions(); void loadFiles() }}
         />
@@ -817,6 +1174,9 @@ function App() {
       <RightInspector
         open={panelOpen}
         collapsed={inspectorCollapsed}
+        inspectorWidth={inspectorWidth}
+        currentProjectId={currentProjectId}
+        sessionId={sessionId}
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         close={() => { setPanelOpen(false); setInspectorCollapsed(true) }}
@@ -825,11 +1185,16 @@ function App() {
         files={files}
         preview={preview}
         evidence={evidence}
+        turns={turns}
+        validations={validations}
         status={statusSummary}
         todos={todos}
         currentTodoId={currentTodoId}
         onPreview={(file) => void previewFile(file.path, file)}
         onReference={referenceFile}
+        onValidationsChange={setValidations}
+        onFixValidation={(record) => void fixValidation(record)}
+        onResize={(width) => setInspectorWidth(Math.min(620, Math.max(300, width)))}
       />
     </WorkbenchLayout>
   )

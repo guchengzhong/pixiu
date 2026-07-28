@@ -101,18 +101,21 @@ export async function runScenario(input: Scenario): Promise<ScenarioResult> {
       for (const reply of input.replies) reply(fixture.llm)
       result = await fixture.run(input.prompt, input.run)
       events = maybeParseEvents(result.stdout)
-      const sessionId = sessionIdFromEvents(events) ?? (await singleWorkspaceSessionId(fixture.projectDir))
+      const sessionId = sessionIdFromEvents(events) ?? (await singleSessionId(fixture.projectDir))
+      const workspaceDir = sessionId ? await fixture.workspaceDir(sessionId) : undefined
       await assertScenario(input, {
         result,
         events,
         hits: fixture.llm.hits,
         projectDir: fixture.projectDir,
+        ...(workspaceDir ? { workspaceDir } : {}),
         ...(sessionId ? { sessionId } : {}),
       })
       return { result, events, hits: fixture.llm.hits, ...(sessionId ? { sessionId } : {}) }
     } catch (cause) {
       const artifactDir = await writeEvidence(input.name, {
         projectDir: fixture.projectDir,
+        workspaceStateRoot: fixture.workspaceStateRoot,
         events,
         hits: fixture.llm.hits,
         ...(result ? { result } : {}),
@@ -130,6 +133,7 @@ async function assertScenario(
     events: AgentEvent[]
     hits: Hit[]
     projectDir: string
+    workspaceDir?: string
     sessionId?: string
   },
 ) {
@@ -157,9 +161,8 @@ async function assertScenario(
   }
 
   if (expected.workspaceFiles || expected.workspaceMissing) {
-    const sessionId = context.sessionId
-    assert(sessionId !== undefined, "workspace assertions need a session id")
-    const root = join(context.projectDir, "workspace", sessionId)
+    const root = context.workspaceDir
+    assert(root !== undefined, "workspace assertions need a bound session workspace")
     for (const [path, matcher] of Object.entries(expected.workspaceFiles ?? {})) {
       const content = await readFile(join(root, path), "utf8")
       assert(matches(content, matcher), `workspace file ${path} did not match ${describeMatcher(matcher)}`)
@@ -194,12 +197,14 @@ function sessionIdFromEvents(events: AgentEvent[]) {
   return event?.type === "session_created" ? event.sessionId : undefined
 }
 
-async function singleWorkspaceSessionId(projectDir: string) {
-  const workspace = join(projectDir, "workspace")
+async function singleSessionId(projectDir: string) {
+  const sessions = join(projectDir, ".pixiu/state/sessions")
   try {
-    const entries = await readdir(workspace, { withFileTypes: true })
-    const dirs = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name)
-    return dirs.length === 1 ? dirs[0] : undefined
+    const entries = await readdir(sessions, { withFileTypes: true })
+    const ids = entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+      .map((entry) => entry.name.slice(0, -".jsonl".length))
+    return ids.length === 1 ? ids[0] : undefined
   } catch {
     return undefined
   }
@@ -251,6 +256,7 @@ async function writeEvidence(
   name: string,
   input: {
     projectDir: string
+    workspaceStateRoot: string
     result?: PixiuProcessResult
     events: AgentEvent[]
     hits: Hit[]
@@ -261,9 +267,9 @@ async function writeEvidence(
   await writeFile(join(dir, "stderr.txt"), input.result?.stderr ?? "", "utf8")
   await writeFile(join(dir, "events.json"), JSON.stringify(input.events, null, 2), "utf8")
   await writeFile(join(dir, "llm-hits.json"), JSON.stringify(redactJson(input.hits), null, 2), "utf8")
-  await writeFile(join(dir, "workspace-tree.txt"), (await tree(join(input.projectDir, "workspace"))).join("\n"), "utf8")
+  await writeFile(join(dir, "workspace-tree.txt"), (await tree(input.workspaceStateRoot)).join("\n"), "utf8")
   await writeFile(join(dir, "sessions-tree.txt"), (await tree(join(input.projectDir, ".pixiu/state/sessions"))).join("\n"), "utf8")
-  await copyTextTree(join(input.projectDir, "workspace"), join(dir, "workspace"))
+  await copyTextTree(input.workspaceStateRoot, join(dir, "workspace"))
   await copyTextTree(join(input.projectDir, ".pixiu/state/sessions"), join(dir, "sessions"))
   return dir
 }

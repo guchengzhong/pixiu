@@ -1,5 +1,4 @@
-import { mkdir } from "node:fs/promises"
-import { isAbsolute, join, relative, resolve } from "node:path"
+import { join, resolve } from "node:path"
 
 import type { PixiuConfig } from "../config/defaults"
 import { loadConfig, resolveProviderConfig } from "../config/loader"
@@ -23,9 +22,15 @@ import { createMCPClient } from "../mcp/status"
 import { mcpToolsToDefinitions } from "../mcp/tools"
 import { PixiuError } from "../shared/errors"
 import { installAgentReach, installBrowserUse, managedEnvPathPrepend } from "../tools/managed-env"
+import {
+  createSessionWorkspaceBinding,
+  resolveSessionWorkspaceStateRoot,
+  sessionWorkspaceProjectExcludePaths,
+} from "../workspace/session"
 
 export type RuntimeOptions = {
   cwd?: string
+  model?: string
   config?: PixiuConfig
   yes?: boolean
   permissionMode?: PermissionMode
@@ -124,15 +129,13 @@ export async function buildRuntime(options: RuntimeOptions = {}): Promise<Runtim
     config: toolConfig,
   })
   const toolContextForSession = (session: SessionRecord) => createToolContext(session.cwd || cwd)
-  const workspaceRoot =
-    config.sandbox.workspaceDir && isAbsolute(config.sandbox.workspaceDir)
-      ? config.sandbox.workspaceDir
-      : resolve(cwd, config.sandbox.workspaceDir)
+  const workspaceRoot = resolveSessionWorkspaceStateRoot(config.sandbox.workspaceDir)
+  const workspaceExcludePaths = sessionWorkspaceProjectExcludePaths(config.sandbox.workspaceDir)
   const runnerOptions = {
     llm,
     tools,
     sessions,
-    model: agentConfig.model ?? provider.model ?? config.model,
+    model: options.model ?? agentConfig.model ?? provider.model ?? config.model,
     systemPrompt: [agentConfig.systemPrompt, skillPrompt].filter(Boolean).join("\n\n"),
     toolNames: agentConfig.tools,
     maxSteps: agentConfig.maxSteps,
@@ -147,13 +150,21 @@ export async function buildRuntime(options: RuntimeOptions = {}): Promise<Runtim
     ...(config.sandbox.mode === "workspace"
       ? {
           async createSessionWorkspace(sessionId: string) {
-            const sessionRoot = join(workspaceRoot, sessionId)
-            await mkdir(sessionRoot, { recursive: true })
+            const binding = await createSessionWorkspaceBinding({
+              stateRoot: workspaceRoot,
+              projectRoot: cwd,
+              sessionId,
+              excludePaths: workspaceExcludePaths,
+            })
             return {
-              cwd: sessionRoot,
+              cwd: binding.workRoot,
               metadata: {
                 sandboxMode: "workspace",
-                workspaceDir: relative(cwd, sessionRoot),
+                workspaceDir: binding.workRoot,
+                workspaceBindingVersion: binding.version,
+                workspaceStateRoot: binding.stateRoot,
+                workspaceProjectRoot: binding.projectRoot,
+                workspaceBaseRevision: binding.baseRevision,
               },
             }
           },

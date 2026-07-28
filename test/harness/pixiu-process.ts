@@ -1,8 +1,9 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
+import { chmod, lstat, mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
 import type { AgentEvent } from "../../src/agent/events"
+import { loadSessionWorkspaceBinding } from "../../src/workspace/session"
 import { createFakeLLMServer, type FakeLLMServer } from "./llm-server"
 
 const REPO_ROOT = resolve(import.meta.dir, "../..")
@@ -47,7 +48,9 @@ export type PixiuFixture = {
   rootDir: string
   homeDir: string
   projectDir: string
+  workspaceStateRoot: string
   llm: FakeLLMServer
+  workspaceDir(sessionId: string): Promise<string>
   run(message: string, options?: PixiuRunOptions): Promise<PixiuProcessResult>
   exec(args: string[], options?: PixiuSpawnOptions): Promise<PixiuProcessResult>
   spawn(args: string[], options?: PixiuSpawnOptions): PixiuSpawnHandle
@@ -58,6 +61,7 @@ export async function withPixiuFixture<T>(fn: (fixture: PixiuFixture) => Promise
   const homeDir = join(rootDir, "home")
   const projectDir = join(rootDir, "project")
   const tmpDir = join(rootDir, "tmp")
+  const workspaceStateRoot = join(homeDir, ".local/state/pixiu/workspace")
   const llm = await createFakeLLMServer()
   const handles = new Set<PixiuSpawnHandle>()
 
@@ -71,7 +75,15 @@ export async function withPixiuFixture<T>(fn: (fixture: PixiuFixture) => Promise
     rootDir,
     homeDir,
     projectDir,
+    workspaceStateRoot,
     llm,
+    async workspaceDir(sessionId) {
+      return (await loadSessionWorkspaceBinding({
+        stateRoot: workspaceStateRoot,
+        projectRoot: projectDir,
+        sessionId,
+      })).workRoot
+    },
     run(message, options = {}) {
       const args = [
         "run",
@@ -108,8 +120,16 @@ export async function withPixiuFixture<T>(fn: (fixture: PixiuFixture) => Promise
   } finally {
     await Promise.all([...handles].map((handle) => handle.close().catch(() => undefined)))
     await llm.close()
+    await makeTreeRemovable(rootDir)
     await rm(rootDir, { recursive: true, force: true })
   }
+}
+
+async function makeTreeRemovable(root: string): Promise<void> {
+  const info = await lstat(root)
+  if (info.isSymbolicLink() || !info.isDirectory()) return
+  await chmod(root, 0o700)
+  for (const child of await readdir(root)) await makeTreeRemovable(join(root, child))
 }
 
 export function parseJsonEvents<T = AgentEvent>(stdout: string): T[] {

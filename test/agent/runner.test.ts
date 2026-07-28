@@ -28,10 +28,11 @@ describe("agent runner", () => {
         return { ok: true, content: String(input.text), data: input }
       },
     })
+    const sessions = new MemorySessionStore()
     const runner = new AgentRunner({
       llm,
       tools,
-      sessions: new MemorySessionStore(),
+      sessions,
       model: "scripted",
       systemPrompt: "test",
       maxSteps: 4,
@@ -45,7 +46,7 @@ describe("agent runner", () => {
     })
 
     const events = []
-    for await (const event of runner.run({ message: "go" })) events.push(event)
+    for await (const event of runner.run({ message: "go", turnId: "turn_test" })) events.push(event)
 
     expect(events.find((event) => event.type === "context_usage")).toMatchObject({
       type: "context_usage",
@@ -53,6 +54,9 @@ describe("agent runner", () => {
     })
     expect(events.some((event) => event.type === "tool_result" && event.ok)).toBe(true)
     expect(events.some((event) => event.type === "message" && event.content === "pong")).toBe(true)
+    const sessionId = events.find((event): event is Extract<AgentEvent, { type: "session_created" }> => event.type === "session_created")?.sessionId
+    expect(sessionId).toBeDefined()
+    expect((await sessions.readMessages(sessionId!)).every((message) => message.turnId === "turn_test")).toBe(true)
   })
 
   test("emits provider usage when the model stream includes it", async () => {
@@ -1041,7 +1045,6 @@ describe("agent runner", () => {
           },
           { type: "finish", reason: "tool_calls" },
         ],
-        [{ type: "text_start" }, { type: "text_delta", text: "FINAL: waiting" }, { type: "text_end", text: "FINAL: waiting" }, { type: "finish", reason: "stop" }],
       ],
       tools,
     )
@@ -1051,6 +1054,12 @@ describe("agent runner", () => {
       ok: true,
       metadata: { userActionRequired: true, category: "auth" },
     })
+    expect(events.find((event) => event.type === "message")).toMatchObject({
+      type: "message",
+      role: "assistant",
+      content: "需要扫码登录",
+    })
+    expect(events.at(-1)).toMatchObject({ type: "finish", reason: "user_action_required" })
   })
 })
 
